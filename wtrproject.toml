@@ -1,0 +1,10 @@
+format_version = 1
+
+[project]
+name = "DMDebug"
+ioc_file = "DMDebug.ioc"
+
+[dependencies]
+packages = [
+    "memory::StaticObject",
+]
