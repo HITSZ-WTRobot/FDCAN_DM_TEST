@@ -6,5 +6,7 @@ ioc_file = "DMDebug.ioc"
 
 [dependencies]
 packages = [
+    "MotorDrivers::DM",
+    "Trajectory::MotorTrajectory",
     "memory::StaticObject",
 ]
