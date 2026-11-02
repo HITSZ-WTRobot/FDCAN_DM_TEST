@@ -52,8 +52,8 @@ struct MotionLimits
  * uses deg/s, not rpm. Position and velocity thus have separate protocol scales.
  *
  * Command solving runs in the polling task, sampling in TIM7 (100 Hz), feedback and
- * status updates in TIM3 (500 Hz). TIM6 runs at 1 kHz and alternates two groups of
- * three; each motor keeps a 500 Hz TX slot. All three timers and
+ * status updates in TIM3 (500 Hz). TIM6 runs at 2 kHz and alternates two groups of
+ * three; each motor keeps a 1 kHz TX slot. All three timers and
  * CAN RX share one non-preempting priority. Task state handoffs use short ISRGuards;
  * curve solving does not mask interrupts, and the previous reference remains valid.
  *
@@ -81,7 +81,7 @@ public:
     void commandUpdate();             // Ozone task: commands and new S-curve solving.
     void profileUpdate();             // TIM7: sample position + velocity, dt=0.01 s.
     void feedbackUpdate();            // TIM3: new feedback, readiness/faults/arrival.
-    void sendUpdate();                // TIM6: selected group only, one frame attempt/2 ms.
+    void sendUpdate();                // TIM6: selected group only, one frame attempt/1 ms.
     void transmitFailed();            // Latch fault; no immediate retry or CAN submission.
     void feedbackReceived() noexcept; // Called after the driver's receive callback.
 

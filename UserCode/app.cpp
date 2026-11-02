@@ -18,7 +18,7 @@ device::ControlParameters dm_control[6]{
 };
 
 bsp::can::Can* dm_can = nullptr;
-device::DMPositionTest* dm_motors[6]{}; // 索引及部位见下方 motor_parameters；Master ID=0x20。
+device::DMPositionTest* dm_motors[6]{}; // 索引及部位见下方表；每台Master ID=0x20+CAN ID。
 
 struct MotorParameters
 {
@@ -31,7 +31,7 @@ struct MotorParameters
 
 // 来源：参考资料/参考资料/电机参数；不含四个底盘电机。
 // PMAX/VMAX/TMAX是电机端协议映射量程，不是机构运动限制或外部PID增益。
-static constexpr std::uint32_t MotorMasterId = 0x20;
+static constexpr std::uint32_t MotorMasterIdBase = motors::DMMotor::MasterIDOffset;
 static constexpr MotorParameters motor_parameters[6]{
     {0x0A, motors::DMMotor::Type::S3519,     12.5f, 200.0f, 10.0f}, // [0] 右前伸缩电机，DM-S3519
     {0x0B, motors::DMMotor::Type::S3519,     12.5f, 200.0f, 10.0f}, // [1] 中伸缩电机，DM-S3519
@@ -53,7 +53,8 @@ static constexpr device::MotionLimits default_motion_limits[6]{
 };
 
 /* Ozone 操作（MIT直接跟踪，未在MCU建立外部位置环或速度环）：
- * 实物须先设为MIT；CAN ID、型号和量程按motor_parameters，Master ID统一为0x20。
+ * 实物须先设为MIT；CAN ID、型号和量程按motor_parameters。
+ * 每台Master ID=0x20+CAN ID，即0x2A~0x2F；须由操作者同步设置电机端。
  * 图中CAN Timeout均为0，不能依赖电机端超时自动停机；本程序不改写该参数。
  * 仲裁1M/数据5M、FD+BRS保持已确认配置，实板收发与稳定性仍须验证。
  * dm_control在构造时复制；改完重启，或在motor_init之前通过Ozone填写。
@@ -77,7 +78,7 @@ static constexpr device::MotionLimits default_motion_limits[6]{
  * 4. 先填target_deg，再写Move(4)。观察accepted_target_deg、reference_deg和
  *    reference_velocity_deg_s。运动中Move返回Busy，不替换原轨迹。
  *    任务只求解新曲线；TIM7以100Hz推进位置/速度参考；TIM3以500Hz处理反馈、
- *    到位、零点与故障；TIM6以1kHz轮换发送两组三台，每台仍500Hz。
+ *    到位、零点与故障；TIM6以2kHz轮换发送两组三台，每台1kHz。
  *    使能、失能和故障停机也走各自发送时隙；实际线上时刻仍受CAN仲裁/重发影响。
  * 5. 正常到位看motion_complete；busy=false也可能是Stop/Disable/故障。
  *    Stop(5)取消曲线并保持当前位置，不是S曲线减速停车；Disable(3)请求失能。
@@ -137,13 +138,14 @@ static void motor_init()
 
 static void can_receive(const bsp::can::FrameView& frame)
 {
-    if (frame.header.id_type != bsp::can::IdType::Standard || frame.header.id != MotorMasterId ||
+    if (frame.header.id_type != bsp::can::IdType::Standard ||
         frame.header.type != bsp::can::FrameType::Data || frame.data.size() != 8)
         return;
     const unsigned id = frame.data[0] & 0x0f;
     for (unsigned i = 0; i < 6; ++i)
     {
-        if (id == motor_parameters[i].can_id)
+        if (id == motor_parameters[i].can_id &&
+            frame.header.id == MotorMasterIdBase + motor_parameters[i].can_id)
         {
             dm_motors[i]->feedbackReceived();
             break;
@@ -153,7 +155,9 @@ static void can_receive(const bsp::can::FrameView& frame)
 
 static bool can_init()
 {
-    if (motors::DMMotor::CAN_FilterInit(*dm_can, 0, MotorMasterId) != bsp::can::Status::Ok ||
+    // Upstream DM driver owns its standard mask filter (0x028/0x7F8), covering
+    // legal replies 0x029..0x02F. Instance callbacks reject nonmatching IDs.
+    if (motors::DMMotor::CAN_FilterInit(*dm_can, 0) != bsp::can::Status::Ok ||
         dm_can->configure_filter(bsp::can::GlobalFilter{
             .reject_standard_remote = true, .reject_extended_remote = true}) != bsp::can::Status::Ok)
     {
@@ -195,10 +199,10 @@ static void motorFeedbackUpdate(TIM_HandleTypeDef*) // TIM3, 500 Hz.
         motor->feedbackUpdate();
 }
 
-static void motorMitSendUpdate(TIM_HandleTypeDef*) // TIM6, 1 kHz; each motor 500 Hz.
+static void motorMitSendUpdate(TIM_HandleTypeDef*) // TIM6, 2 kHz; each motor 1 kHz.
 {
     // Unique TX owner: A=[0,1,2] (0A/0B/0C), B=[3,4,5] (0D/0E/0F).
-    // Alternating hardware ticks separate submissions by 1 ms without busy-waits.
+    // Alternating hardware ticks separate submissions by 0.5 ms without busy-waits.
     static unsigned next_group = 0;
     const unsigned first = next_group * 3U;
     next_group ^= 1U;
