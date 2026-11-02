@@ -47,6 +47,9 @@ struct MotionLimits
  * Zero gains, zero output caps or zero tolerances inhibit enable; no tuning is assumed.
  * Motor configuration must be MIT; setCurrent carries Nm with MIT Kp=Kd=0. The motor
  * itself must already be configured by the operator; this object never changes mode.
+ * Protocol caps come from this motor's Config, not shared J4340 defaults. In particular
+ * S3519 position feedback is normalized by the existing driver; reduction_rate remains
+ * the external transmission ratio only. Protocol caps are not mechanical safety limits.
  * All ISR callers must share one non-preempting priority. Task operations use short
  * ISRGuard sections; long trajectory solving gates this device's library updates,
  * not CAN reception or the other five devices. Its last bounded torque is held
@@ -108,6 +111,9 @@ private:
     controllers::MotorVelController controller_;
     trajectory::MotorTrajectory<1> trajectory_;
     ControlParameters control_;
+    float position_lsb_deg_;
+    float protocol_max_velocity_deg_s_;
+    float protocol_max_torque_nm_;
     MotionLimits limits_{};
     bool command_active_{false};          // Access only under ISRGuard or same-priority ISR.
     bool enable_requested_{false};

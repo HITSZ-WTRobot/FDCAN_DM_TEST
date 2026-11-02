@@ -7,9 +7,7 @@ namespace device
 {
 namespace
 {
-constexpr float PositionLsbDeg = 12.5f * 180.0f / (32767.0f * 3.14159265358979323846f);
-constexpr float ProtocolMaxVelocityDegS = 30.0f * 180.0f / 3.14159265358979323846f;
-constexpr float ProtocolMaxTorque = 10.0f;
+constexpr float RadToDeg = 180.0f / 3.14159265358979323846f;
 constexpr unsigned StableSamples = 50;
 
 bool nonnegative(float value) { return std::isfinite(value) && value >= 0.0f; }
@@ -21,7 +19,14 @@ DMPositionTest::DMPositionTest(const motors::DMMotor::Config& motor_config,
     motor_(motor_config),
     controller_(&motor_, {control.velocity_pid, controllers::ControlMode::ExternalPID}),
     trajectory_(&controller_, {0.0f, 0.0f, 0.0f}, control.position_pd, control.finish_deg),
-    control_(control)
+    control_(control),
+    // The driver's S3519 feedback contract uses 19.203 (not the external reducer).
+    // This scales only the stability test's quantization tolerance, not motor commands.
+    position_lsb_deg_(motor_config.pos_max_rad * RadToDeg /
+                      (32767.0f * motor_config.reduction_rate *
+                       (motor_config.type == motors::DMMotor::Type::S3519 ? 19.203f : 1.0f))),
+    protocol_max_velocity_deg_s_(motor_config.vel_max_rad * RadToDeg / motor_config.reduction_rate),
+    protocol_max_torque_nm_(motor_config.tor_max)
 {
 }
 
@@ -30,7 +35,7 @@ bool DMPositionTest::validControl() const noexcept
     const auto& pid = control_.velocity_pid;
     const auto& pd = control_.position_pd;
     return positive(pid.Kp) && nonnegative(pid.Ki) && nonnegative(pid.Kd) &&
-           positive(pid.abs_output_max) && pid.abs_output_max <= ProtocolMaxTorque &&
+           positive(pid.abs_output_max) && pid.abs_output_max <= protocol_max_torque_nm_ &&
            positive(pd.Kp) && nonnegative(pd.Kd) && positive(pd.abs_output_max) &&
            positive(control_.finish_deg) && positive(control_.stationary_rpm);
 }
@@ -38,7 +43,7 @@ bool DMPositionTest::validControl() const noexcept
 bool DMPositionTest::validLimits(const MotionLimits& l) const noexcept
 {
     return std::isfinite(l.min_deg) && std::isfinite(l.max_deg) && l.min_deg < l.max_deg &&
-           positive(l.max_velocity_deg_s) && l.max_velocity_deg_s <= ProtocolMaxVelocityDegS &&
+           positive(l.max_velocity_deg_s) && l.max_velocity_deg_s <= protocol_max_velocity_deg_s_ &&
            positive(l.max_acceleration_deg_s2) && positive(l.max_jerk_deg_s3);
 }
 
@@ -126,7 +131,7 @@ void DMPositionTest::observeFeedback()
     {
         const float low = std::min(stable_min_, position);
         const float high = std::max(stable_max_, position);
-        if (high - low > 2.0f * PositionLsbDeg)
+        if (high - low > 2.0f * position_lsb_deg_)
         {
             stable_min_ = stable_max_ = position;
             stable_samples_ = 1;

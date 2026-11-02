@@ -11,10 +11,32 @@
 device::ControlParameters dm_control[6]{};
 
 bsp::can::Can* dm_can = nullptr;
-device::DMPositionTest* dm_motors[6]{}; // [0..5] -> CAN ID [1..6], Master ID 0.
+device::DMPositionTest* dm_motors[6]{}; // 索引及部位见下方 motor_parameters；Master ID=0x20。
+
+struct MotorParameters
+{
+    std::uint8_t can_id;
+    motors::DMMotor::Type type;
+    float pos_max_rad;
+    float vel_max_rad_s;
+    float torque_max_nm;
+};
+
+// 来源：参考资料/参考资料/电机参数；不含四个底盘电机。
+// PMAX/VMAX/TMAX是电机端协议映射量程，不是机构运动限制或外部PID增益。
+static constexpr std::uint32_t MotorMasterId = 0x20;
+static constexpr MotorParameters motor_parameters[6]{
+    {0x0A, motors::DMMotor::Type::S3519,     12.5f, 200.0f, 10.0f}, // [0] 右前伸缩电机，DM-S3519
+    {0x0B, motors::DMMotor::Type::S3519,     12.5f, 200.0f, 10.0f}, // [1] 中伸缩电机，DM-S3519
+    {0x0C, motors::DMMotor::Type::S3519,     12.5f, 200.0f, 10.0f}, // [2] 后伸缩电机，DM-S3519
+    {0x0D, motors::DMMotor::Type::J4340_2EC, 12.5f,  10.0f, 28.0f}, // [3] 左前旋转电机，DM-J4340P
+    {0x0E, motors::DMMotor::Type::S3519,     12.5f, 200.0f, 10.0f}, // [4] 左前伸缩电机，DM-S3519
+    {0x0F, motors::DMMotor::Type::J4340_2EC, 12.5f,  10.0f, 28.0f}  // [5] 右前旋转电机，DM-J4340P
+};
 
 /* Ozone 操作：
- * 实物须先设为MIT，CAN ID=1~6、Master ID=0，量程12.5rad/30rad/s/10Nm。
+ * 实物须先设为MIT；CAN ID、型号和量程按motor_parameters，Master ID统一为0x20。
+ * 图中CAN Timeout均为0，不能依赖电机端通信超时自动停机；本程序不改写该参数。
  * 仲裁1M/数据5M、FD+BRS按用户决定暂定；电机兼容性、方向和稳定性未实板验证。
  * dm_control[0..5]在构造时复制：修改后须重启，或在motor_init之前通过Ozone填写。
  * velocity_pid={Kp,Ki,Kd,abs_output_max}，输入rpm，输出/上限Nm；
@@ -63,18 +85,19 @@ static void motor_init()
     dm_can = INIT_OBJECT(can_storage, hfdcan1);
     for (unsigned i = 0; i < 6; ++i)
     {
+        const auto& parameters = motor_parameters[i];
         const motors::DMMotor::Config config{
             .can = *dm_can,
-            .id0 = static_cast<std::uint8_t>(i + 1),
-            // This driver's J4340 path uses output-shaft feedback without another
-            // internal reduction; the J4340P protocol ranges were confirmed separately.
-            .type = motors::DMMotor::Type::J4340_2EC,
+            .id0 = parameters.can_id,
+            .type = parameters.type,
             .mode = motors::DMMotor::Mode::MIT,
-            .pos_max_rad = 12.5f,
-            .vel_max_rad = 30.0f,
-            .tor_max = 10.0f,
+            .pos_max_rad = parameters.pos_max_rad,
+            .vel_max_rad = parameters.vel_max_rad_s,
+            .tor_max = parameters.torque_max_nm,
             .auto_zero = false, // Device waits for genuinely new, stationary feedback.
             .reverse = false,
+            // reduction_rate只表示外接减速；S3519的位置换算由驱动Type负责。
+            // 不把图片中的内置19.2032或40再次叠加到外接减速比。
             .reduction_rate = 1.0f,
             .can_fd_brs = true
         };
@@ -84,17 +107,23 @@ static void motor_init()
 
 static void can_receive(const bsp::can::FrameView& frame)
 {
-    if (frame.header.id_type != bsp::can::IdType::Standard || frame.header.id != 0 ||
+    if (frame.header.id_type != bsp::can::IdType::Standard || frame.header.id != MotorMasterId ||
         frame.header.type != bsp::can::FrameType::Data || frame.data.size() != 8)
         return;
     const unsigned id = frame.data[0] & 0x0f;
-    if (id >= 1 && id <= 6)
-        dm_motors[id - 1]->feedbackReceived();
+    for (unsigned i = 0; i < 6; ++i)
+    {
+        if (id == motor_parameters[i].can_id)
+        {
+            dm_motors[i]->feedbackReceived();
+            break;
+        }
+    }
 }
 
 static bool can_init()
 {
-    if (motors::DMMotor::CAN_FilterInit(*dm_can, 0, 0) != bsp::can::Status::Ok ||
+    if (motors::DMMotor::CAN_FilterInit(*dm_can, 0, MotorMasterId) != bsp::can::Status::Ok ||
         dm_can->configure_filter(bsp::can::GlobalFilter{
             .reject_standard_remote = true, .reject_extended_remote = true}) != bsp::can::Status::Ok)
     {
