@@ -56,6 +56,12 @@ struct MotionLimits
  * CAN RX share one non-preempting priority. Task state handoffs use short ISRGuards;
  * curve solving does not mask interrupts, and the previous reference remains valid.
  *
+ * Application-provided limits are staged before CAN starts and automatically
+ * validated/applied after the first software zero. Invalid defaults leave
+ * limits_configured false and inhibit enable, without clamping or changing PMAX.
+ * ApplyLimits still permits an explicit disabled-state override. Subsequent rezero
+ * translates accepted limits instead of restoring the initial defaults.
+ *
  * Enable first preloads a hold reference while disabled, then requests enable; only
  * fresh feedback confirms state. Faults cancel motion and request disable with no
  * auto-restart. Software limits and protocol bounds do not provide hardware safety.

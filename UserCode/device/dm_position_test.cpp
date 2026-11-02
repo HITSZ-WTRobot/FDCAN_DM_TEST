@@ -198,7 +198,7 @@ void DMPositionTest::feedbackUpdate()
         }
     }
     if (!zeroed && stable_samples_ >= StableSamples && !command_active_)
-        (void)setZero();
+        result = setZero();
 }
 
 Result DMPositionTest::applyLimits()
@@ -242,6 +242,10 @@ Result DMPositionTest::setZero()
     position_deg = 0.0f;
     zeroed = true;
     stable_samples_ = 0;
+    // The application stages defaults before starting CAN. Apply them only when
+    // no limits have been accepted; later rezero translates the accepted limits.
+    if (!limits_configured)
+        return applyLimits();
     return Result::Ok;
 }
 

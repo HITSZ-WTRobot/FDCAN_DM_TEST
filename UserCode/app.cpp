@@ -41,6 +41,17 @@ static constexpr MotorParameters motor_parameters[6]{
     {0x0F, motors::DMMotor::Type::J4340_2EC, 12.5f,  10.0f, 28.0f}  // [5] 右前旋转电机，DM-J4340P
 };
 
+// 用户确认：不改电机PMAX，先小范围调试；单位deg、deg/s、deg/s²、deg/s³。
+// 先写入设备暂存字段，首次软件归零后检查并自动应用；绝不自动使能。
+static constexpr device::MotionLimits default_motion_limits[6]{
+    {-30.0f,   30.0f, 10.0f, 20.0f, 100.0f}, // [0] 右前伸缩。
+    {-30.0f,   30.0f, 10.0f, 20.0f, 100.0f}, // [1] 中伸缩。
+    {-30.0f,   30.0f, 10.0f, 20.0f, 100.0f}, // [2] 后伸缩。
+    {-180.0f, 180.0f, 10.0f, 20.0f, 100.0f}, // [3] 左前旋转。
+    {-30.0f,   30.0f, 10.0f, 20.0f, 100.0f}, // [4] 左前伸缩。
+    {-180.0f, 180.0f, 10.0f, 20.0f, 100.0f}  // [5] 右前旋转。
+};
+
 /* Ozone 操作（MIT直接跟踪，未在MCU建立外部位置环或速度环）：
  * 实物须先设为MIT；CAN ID、型号和量程按motor_parameters，Master ID统一为0x20。
  * 图中CAN Timeout均为0，不能依赖电机端超时自动停机；本程序不改写该参数。
@@ -50,15 +61,17 @@ static constexpr MotorParameters motor_parameters[6]{
  * 电机执行内部MIT控制。前馈只是附加力矩，不是总输出力矩限制；当前位置误差
  * 仍会产生保持力矩。初值不保证带载稳定或重力补偿，须支撑机构并逐台微调。
  * finish_deg=0.3为到位观察阈值；stationary_rpm按两种协议速度分辨率设置，
- * 均不是机械保护参数。kp/kd非法或为0时拒绝使能；机械运动限值仍必须由用户填写。
+ * 均不是机械保护参数。kp/kd非法或为0时拒绝使能；默认运动限值见default_motion_limits。
  *
  * 1. dm_startup=Ready后保持失能；50次新的失能且静止反馈，在两倍位置协议
  *    分辨率内稳定后建立本次启动的软件零点。驱动内部绝对坐标不清零。
  *    S3519依用户实测保留减速前位置口径：反馈由库除19.203，发送位置参考
  *    在接入层换回原口径；速度仍按库的输出轴反馈契约，不再叠加内置减速比。
- * 2. 展开dm_motors[0..5]，确认zeroed=true、command=None，填写min_deg、max_deg、
- *    max_velocity_deg_s、max_acceleration_deg_s2、max_jerk_deg_s3，最后写ApplyLimits(6)。
- *    限位相对软件零点；整个范围还须能编码为绝对MIT位置，超出PMAX拒绝而非静默截断。
+ * 2. 首次归零后自动校验并应用默认限值，无需手工提交ApplyLimits：伸缩±30°、
+ *    旋转±180°，速度10°/s、加速度20°/s²、jerk100°/s³。确认zeroed=true、
+ *    limits_configured=true、result=Ok。若当前零点使整个默认范围超出绝对PMAX，
+ *    result=InvalidParameters、limits_configured=false，拒绝使能，不静默截断。
+ *    需要覆盖时，在失能状态编辑五个限值字段，再提交ApplyLimits(6)。
  * 3. 等command=None、result=Ok，再写Enable(2)。先预装当前位置保持参考，
  *    再请求使能；等待connected=true、enable_pending=false、enabled=true、fault=false。
  * 4. 先填target_deg，再写Move(4)。观察accepted_target_deg、reference_deg和
@@ -112,6 +125,12 @@ static void motor_init()
             .can_fd_brs = true
         };
         dm_motors[i] = INIT_OBJECT(motor_storage[i], config, dm_control[i]);
+        const auto& limits = default_motion_limits[i];
+        dm_motors[i]->min_deg = limits.min_deg;
+        dm_motors[i]->max_deg = limits.max_deg;
+        dm_motors[i]->max_velocity_deg_s = limits.max_velocity_deg_s;
+        dm_motors[i]->max_acceleration_deg_s2 = limits.max_acceleration_deg_s2;
+        dm_motors[i]->max_jerk_deg_s3 = limits.max_jerk_deg_s3;
     }
 }
 
