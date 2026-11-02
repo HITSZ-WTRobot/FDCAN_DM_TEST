@@ -1,9 +1,205 @@
 #include "cmsis_os2.h"
+#include "device/dm_position_test.hpp"
+#include "fdcan.h"
+#include "static_object.hpp"
+#include "tim.h"
+#include "watchdog.hpp"
 
-extern "C" void Init(void* argument)
+// Fixed control parameters, copied during construction. All 0.0f as requested.
+// Set valid values here and rebuild, or set them in Ozone BEFORE motor_init().
+// PID input rpm/output Nm; position PD output deg/s; gains are discrete at 500 Hz.
+device::ControlParameters dm_control[6]{};
+
+bsp::can::Can* dm_can = nullptr;
+device::DMPositionTest* dm_motors[6]{}; // [0..5] -> CAN ID [1..6], Master ID 0.
+
+/* Ozone 操作：
+ * 实物须先设为MIT，CAN ID=1~6、Master ID=0，量程12.5rad/30rad/s/10Nm。
+ * 仲裁1M/数据5M、FD+BRS按用户决定暂定；电机兼容性、方向和稳定性未实板验证。
+ * dm_control[0..5]在构造时复制：修改后须重启，或在motor_init之前通过Ozone填写。
+ * velocity_pid={Kp,Ki,Kd,abs_output_max}，输入rpm，输出/上限Nm；
+ * position_pd={Kp,Kd,abs_output_max}，输入deg，补偿输出deg/s；
+ * finish_deg是到位误差，stationary_rpm是静止速度阈值；两环均500Hz，不另乘除dt。
+ * 目前全部为0.0：拒绝使能；静止阈值为0时也不自动设零，避免猜测机构参数。
+ *
+ * 1. dm_startup=Ready后，设备仍失能。静止阈值有效、50次新的失能反馈位置
+ *    变化在两倍协议分辨率内时，各电机自动建立本次启动的软件零点。
+ * 2. 展开dm_motors[0..5]，确认zeroed=true、command=None，填写min_deg、max_deg、
+ *    max_velocity_deg_s、max_acceleration_deg_s2、max_jerk_deg_s3，最后写
+ *    command=ApplyLimits(6)。限位相对软件零点，必须包含当前实际位置。
+ *    轨迹速度受max_velocity_deg_s限制，位置PD还可叠加abs_output_max的速度补偿。
+ * 3. 等command回到None、result=Ok，再写Enable(2)；等待connected=true、
+ *    enable_pending=false、enabled=true、fault=false，不把命令受理当成已使能。
+ * 4. 先填target_deg，再写Move(4)；accepted_target_deg是实际接受的目标。
+ *    运动中Move返回Busy，不替换旧轨迹。每条命令等command=None后再提交。
+ * 5. 正常到位看motion_complete；busy=false也可能是Stop/Disable/故障。
+ *    Stop(5)取消曲线并保持当前位置，不是S曲线减速停车；Disable(3)请求失能。
+ *    失能确认须connected=true且新的motor_state=0，断线不能证明实际已停。
+ * 6. SetZero(1)仅在失能、静止且反馈有效时接受，不写电机Flash；已应用限位
+ *    随软件零点平移，保持原物理范围。故障后不自动恢复，须排除原因后人工Enable。
+ * 7. 发送统计只代表提交到硬件FIFO，不代表电机执行。暂停CPU/单步会中断控制
+ *    和发包，须先失能并支撑机构；软件保护不代替机械支撑、硬件急停或电机超时设置。
+ * 验证：固件编译和真实app/驱动/SCurve/PD/PID主机烟测通过；主机CAN/HAL/RTOS
+ * 边界和机构为模拟，不证明实物收发、方向、稳定性或机械安全。未烧录、未操作实物。
+ */
+
+enum class Startup : std::uint32_t
 {
-    /* 初始化代码 */
+    NotStarted, Ready, TaskFailed, FilterFailed, ReceiveCallbackFailed,
+    DelayCompensationFailed, CanStartFailed, TimerCallbackFailed, TimerStartFailed
+};
+volatile Startup dm_startup{Startup::NotStarted};
+volatile std::uint32_t dm_rx_frames{0};
+volatile std::uint32_t dm_tx_submitted_frames{0}; // Hardware submission, not motor execution.
+volatile std::uint32_t dm_tx_failures{0};
 
-    /* 初始化完成后退出线程 */
+// Existing fixed-storage package performs explicit placement new. Objects are
+// permanent and never allocate from the project's small C/C++ heap or an ISR.
+static memory::StaticObject<bsp::can::Can> can_storage;
+static memory::StaticObject<device::DMPositionTest> motor_storage[6];
+
+static void motor_init()
+{
+    dm_can = INIT_OBJECT(can_storage, hfdcan1);
+    for (unsigned i = 0; i < 6; ++i)
+    {
+        const motors::DMMotor::Config config{
+            .can = *dm_can,
+            .id0 = static_cast<std::uint8_t>(i + 1),
+            // This driver's J4340 path uses output-shaft feedback without another
+            // internal reduction; the J4340P protocol ranges were confirmed separately.
+            .type = motors::DMMotor::Type::J4340_2EC,
+            .mode = motors::DMMotor::Mode::MIT,
+            .pos_max_rad = 12.5f,
+            .vel_max_rad = 30.0f,
+            .tor_max = 10.0f,
+            .auto_zero = false, // Device waits for genuinely new, stationary feedback.
+            .reverse = false,
+            .reduction_rate = 1.0f,
+            .can_fd_brs = true
+        };
+        dm_motors[i] = INIT_OBJECT(motor_storage[i], config, dm_control[i]);
+    }
+}
+
+static void can_receive(const bsp::can::FrameView& frame)
+{
+    if (frame.header.id_type != bsp::can::IdType::Standard || frame.header.id != 0 ||
+        frame.header.type != bsp::can::FrameType::Data || frame.data.size() != 8)
+        return;
+    const unsigned id = frame.data[0] & 0x0f;
+    if (id >= 1 && id <= 6)
+        dm_motors[id - 1]->feedbackReceived();
+}
+
+static bool can_init()
+{
+    if (motors::DMMotor::CAN_FilterInit(*dm_can, 0, 0) != bsp::can::Status::Ok ||
+        dm_can->configure_filter(bsp::can::GlobalFilter{
+            .reject_standard_remote = true, .reject_extended_remote = true}) != bsp::can::Status::Ok)
+    {
+        dm_startup = Startup::FilterFailed;
+        return false;
+    }
+    if (dm_can->register_callback(can_receive) != bsp::can::Status::Ok)
+    {
+        dm_startup = Startup::ReceiveCallbackFailed;
+        return false;
+    }
+    // FD+BRS at 5 Mbps: SSP offset follows the configured data sample point.
+    // Driver/HAL measure the TXD->RXD loop delay; no guessed transceiver delay.
+    const auto sample_mtq = hfdcan1.Init.DataPrescaler * (1U + hfdcan1.Init.DataTimeSeg1);
+    if (dm_can->configure_tx_delay_compensation({true, sample_mtq, 0}) != bsp::can::Status::Ok)
+    {
+        dm_startup = Startup::DelayCompensationFailed;
+        return false;
+    }
+    if (dm_can->start() != bsp::can::Status::Ok)
+    {
+        dm_startup = Startup::CanStartFailed;
+        return false;
+    }
+    return true;
+}
+
+static void motorProfileUpdate(TIM_HandleTypeDef*) // TIM7, 100 Hz.
+{
+    for (auto* motor : dm_motors)
+        motor->profileUpdate();
+}
+
+static void motorErrorUpdate(TIM_HandleTypeDef*) // TIM3, 500 Hz.
+{
+    for (auto* motor : dm_motors)
+        motor->errorUpdate();
+}
+
+static void motorControllerUpdate(TIM_HandleTypeDef*) // TIM6, 500 Hz.
+{
+    // One owner: default watchdog budget 10 ticks -> approximately 20 ms here.
+    service::Watchdog::EatAll();
+    for (auto* motor : dm_motors)
+    {
+        const auto before = dm_can->counters().tx_submitted_frames;
+        motor->controllerUpdate();
+        if (dm_can->counters().tx_submitted_frames == before)
+        {
+            dm_tx_failures = dm_tx_failures + 1;
+            motor->transmitFailed();
+        }
+    }
+    const auto traffic = dm_can->counters();
+    dm_rx_frames = traffic.rx_frames;
+    dm_tx_submitted_frames = traffic.tx_submitted_frames;
+}
+
+static bool tim_init()
+{
+    if (HAL_TIM_RegisterCallback(&htim7, HAL_TIM_PERIOD_ELAPSED_CB_ID, motorProfileUpdate) != HAL_OK ||
+        HAL_TIM_RegisterCallback(&htim3, HAL_TIM_PERIOD_ELAPSED_CB_ID, motorErrorUpdate) != HAL_OK ||
+        HAL_TIM_RegisterCallback(&htim6, HAL_TIM_PERIOD_ELAPSED_CB_ID, motorControllerUpdate) != HAL_OK)
+    {
+        dm_startup = Startup::TimerCallbackFailed;
+        return false;
+    }
+    if (HAL_TIM_Base_Start_IT(&htim7) != HAL_OK || HAL_TIM_Base_Start_IT(&htim3) != HAL_OK ||
+        HAL_TIM_Base_Start_IT(&htim6) != HAL_OK)
+    {
+        HAL_TIM_Base_Stop_IT(&htim7);
+        HAL_TIM_Base_Stop_IT(&htim3);
+        HAL_TIM_Base_Stop_IT(&htim6);
+        dm_startup = Startup::TimerStartFailed;
+        return false;
+    }
+    return true;
+}
+
+static void motorCommandUpdate(void*)
+{
+    // Initialization runs on this 4096-byte task stack, not the 512-byte Init stack.
+    // Register all six motor callbacks before starting the shared bus or timers.
+    motor_init();
+    if (!can_init() || !tim_init())
+    {
+        osThreadExit();
+        return;
+    }
+    dm_startup = Startup::Ready;
+    for (;;)
+    {
+        for (auto* motor : dm_motors)
+            motor->commandUpdate();
+        osDelay(10); // Ozone command polling only; not a control/trajectory time source.
+    }
+}
+
+extern "C" void Init(void*)
+{
+    osThreadAttr_t attributes{};
+    attributes.name = "dm_command";
+    attributes.priority = osPriorityNormal;
+    attributes.stack_size = 4096;
+    if (osThreadNew(motorCommandUpdate, nullptr, &attributes) == nullptr)
+        dm_startup = Startup::TaskFailed;
     osThreadExit();
 }
