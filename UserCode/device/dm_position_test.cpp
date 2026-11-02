@@ -9,42 +9,49 @@ namespace
 {
 constexpr float RadToDeg = 180.0f / 3.14159265358979323846f;
 constexpr unsigned StableSamples = 50;
-
-bool nonnegative(float value) { return std::isfinite(value) && value >= 0.0f; }
 bool positive(float value) { return std::isfinite(value) && value > 0.0f; }
 } // namespace
 
 DMPositionTest::DMPositionTest(const motors::DMMotor::Config& motor_config,
                                const ControlParameters& control) :
-    motor_(motor_config),
-    controller_(&motor_, {control.velocity_pid, controllers::ControlMode::ExternalPID}),
-    trajectory_(&controller_, {0.0f, 0.0f, 0.0f}, control.position_pd, control.finish_deg),
-    control_(control),
-    // The driver's S3519 feedback contract uses 19.203 (not the external reducer).
-    // This scales only the stability test's quantization tolerance, not motor commands.
-    position_lsb_deg_(motor_config.pos_max_rad * RadToDeg /
-                      (32767.0f * motor_config.reduction_rate *
-                       (motor_config.type == motors::DMMotor::Type::S3519 ? 19.203f : 1.0f))),
-    protocol_max_velocity_deg_s_(motor_config.vel_max_rad * RadToDeg / motor_config.reduction_rate),
-    protocol_max_torque_nm_(motor_config.tor_max)
+    motor_(motor_config), control_(control),
+    // Preserve the existing driver's S3519 contract, confirmed by the user's hardware.
+    position_scale_(motor_config.reduction_rate *
+                    (motor_config.type == motors::DMMotor::Type::S3519 ? 19.203f : 1.0f)),
+    velocity_scale_(motor_config.reduction_rate),
+    protocol_max_position_deg_(motor_config.pos_max_rad * RadToDeg),
+    protocol_max_velocity_deg_s_(motor_config.vel_max_rad * RadToDeg),
+    protocol_max_torque_nm_(motor_config.tor_max),
+    position_lsb_deg_(protocol_max_position_deg_ / (32767.0f * position_scale_))
 {
 }
 
 bool DMPositionTest::validControl() const noexcept
 {
-    const auto& pid = control_.velocity_pid;
-    const auto& pd = control_.position_pd;
-    return positive(pid.Kp) && nonnegative(pid.Ki) && nonnegative(pid.Kd) &&
-           positive(pid.abs_output_max) && pid.abs_output_max <= protocol_max_torque_nm_ &&
-           positive(pd.Kp) && nonnegative(pd.Kd) && positive(pd.abs_output_max) &&
-           positive(control_.finish_deg) && positive(control_.stationary_rpm);
+    return positive(control_.kp) && control_.kp <= 500.0f &&
+           positive(control_.kd) && control_.kd <= 5.0f &&
+           std::isfinite(control_.torque_ff_nm) &&
+           std::fabs(control_.torque_ff_nm) <= protocol_max_torque_nm_ &&
+           positive(control_.finish_deg) && positive(control_.stationary_rpm) &&
+           positive(position_scale_) && positive(velocity_scale_);
+}
+
+bool DMPositionTest::validReference(float position, float velocity) const noexcept
+{
+    const float wire_position = (zero_output_deg_ + position) * position_scale_;
+    const float wire_velocity = velocity * velocity_scale_;
+    return std::isfinite(wire_position) && std::isfinite(wire_velocity) &&
+           std::fabs(wire_position) <= protocol_max_position_deg_ &&
+           std::fabs(wire_velocity) <= protocol_max_velocity_deg_s_;
 }
 
 bool DMPositionTest::validLimits(const MotionLimits& l) const noexcept
 {
     return std::isfinite(l.min_deg) && std::isfinite(l.max_deg) && l.min_deg < l.max_deg &&
-           positive(l.max_velocity_deg_s) && l.max_velocity_deg_s <= protocol_max_velocity_deg_s_ &&
-           positive(l.max_acceleration_deg_s2) && positive(l.max_jerk_deg_s3);
+           positive(l.max_velocity_deg_s) &&
+           l.max_velocity_deg_s * velocity_scale_ <= protocol_max_velocity_deg_s_ &&
+           positive(l.max_acceleration_deg_s2) && positive(l.max_jerk_deg_s3) &&
+           validReference(l.min_deg, 0.0f) && validReference(l.max_deg, 0.0f);
 }
 
 bool DMPositionTest::inRange(float position) const noexcept
@@ -52,35 +59,49 @@ bool DMPositionTest::inRange(float position) const noexcept
     return std::isfinite(position) && position >= limits_.min_deg && position <= limits_.max_deg;
 }
 
+float DMPositionTest::currentPosition() const noexcept
+{
+    return motor_.getAngle() - zero_output_deg_;
+}
+
 void DMPositionTest::feedbackReceived() noexcept
 {
     feedback_count = feedback_count + 1;
 }
 
-void DMPositionTest::disableOutput(bool latch_fault)
+void DMPositionTest::holdPosition(float position) noexcept
 {
-    trajectory_.disable();
-    controller_.getPID().reset();
-    controller_.setRef(0.0f);
-    motor_.disable();
-    commanded_torque_nm = 0.0f;
-    enable_requested_ = false;
-    enable_pending = false;
-    enable_wait_ticks_ = 0;
+    profile_.reset();
+    elapsed_s_ = duration_s_ = 0.0f;
+    reference_deg = position;
+    reference_velocity_deg_s = 0.0f;
+    target_deg = position;
+    accepted_target_deg = position;
     busy = false;
     motion_complete = false;
-    if (latch_fault)
-        fault = true;
-    // enabled is deliberately not cleared here: only feedback can confirm disable.
 }
 
-void DMPositionTest::observeFeedback()
+void DMPositionTest::disableOutput(bool latch_fault)
+{
+    holdPosition(currentPosition());
+    motor_.disable();
+    commanded_torque_ff_nm = 0.0f;
+    enable_requested_ = false;
+    enable_pending = false;
+    enable_phase_ = EnablePhase::None;
+    enable_wait_ticks_ = 0;
+    if (latch_fault)
+        fault = true;
+    // Do not declare physical disable: fresh feedback must confirm it.
+}
+
+void DMPositionTest::feedbackUpdate()
 {
     connected = motor_.isConnected();
     if (!connected)
     {
         stable_samples_ = 0;
-        enabled = false; // No current enable confirmation; not proof of physical disable.
+        enabled = false; // No current confirmation, not proof of physical disable.
         if (ever_connected_ && !fault)
         {
             disableOutput(true);
@@ -89,11 +110,21 @@ void DMPositionTest::observeFeedback()
         return;
     }
     ever_connected_ = true;
+    if (enable_pending)
+    {
+        if (enable_wait_ticks_ == 0)
+        {
+            disableOutput(true);
+            result = Result::MotorFault;
+            return;
+        }
+        --enable_wait_ticks_;
+    }
     const auto count = feedback_count;
     if (count == observed_feedback_count_)
-        return;
+        return; // Cached feedback does not advance zeroing or confirm arrival.
     observed_feedback_count_ = count;
-    position_deg = motor_.getAngle();
+    position_deg = currentPosition();
     velocity_rpm = motor_.getVelocity();
     torque_nm = motor_.getTorque();
     motor_state = static_cast<std::uint32_t>(motor_.state());
@@ -107,13 +138,36 @@ void DMPositionTest::observeFeedback()
         result = Result::MotorFault;
         return;
     }
-    if (enable_pending && enabled)
-        enable_pending = false;
-    if (enable_requested_ && !enable_pending && !enabled)
+    if (enable_requested_)
     {
-        disableOutput(true);
-        result = Result::MotorFault;
-        return;
+        if (enable_pending && enable_phase_ == EnablePhase::WaitEnable && enabled)
+        {
+            enable_pending = false;
+            enable_phase_ = EnablePhase::None;
+        }
+        else if (enable_pending && enable_phase_ == EnablePhase::WaitPreload &&
+                 count != preload_feedback_count_ && motor_state == 0)
+        {
+            enable_phase_ = EnablePhase::SendEnable;
+            enable_wait_ticks_ = WATCHDOG_SNACKS;
+        }
+        else if ((!enable_pending && !enabled) ||
+                 (enable_pending && enabled && enable_phase_ != EnablePhase::WaitEnable))
+        {
+            disableOutput(true);
+            result = Result::MotorFault;
+            return;
+        }
+    }
+    if (enable_requested_ && !enable_pending && !fault)
+    {
+        if (busy && elapsed_s_ >= duration_s_ &&
+            std::fabs(position_deg - accepted_target_deg) <= control_.finish_deg &&
+            std::fabs(velocity_rpm) <= control_.stationary_rpm)
+        {
+            busy = false;
+            motion_complete = true;
+        }
     }
     if (motor_state != 0 || !positive(control_.stationary_rpm) ||
         std::fabs(velocity_rpm) > control_.stationary_rpm)
@@ -151,16 +205,13 @@ Result DMPositionTest::applyLimits()
 {
     if (enable_requested_ || motor_.state() != motors::DMMotor::State::Disabled)
         return Result::Busy;
+    if (!zeroed)
+        return Result::NotZeroed;
     const MotionLimits staged{min_deg, max_deg, max_velocity_deg_s,
                               max_acceleration_deg_s2, max_jerk_deg_s3};
     if (!validLimits(staged))
         return Result::InvalidParameters;
-    // Configure limits only after establishing the coordinate frame.
-    if (!zeroed)
-        return Result::NotZeroed;
     limits_ = staged;
-    trajectory_.setDefaultProfileConfig({staged.max_velocity_deg_s,
-                                        staged.max_acceleration_deg_s2, staged.max_jerk_deg_s3});
     limits_configured = true;
     return Result::Ok;
 }
@@ -173,28 +224,23 @@ Result DMPositionTest::setZero()
         return Result::Busy;
     if (stable_samples_ < StableSamples)
         return Result::NotStationary;
-    const float shift = motor_.getAngle();
+    const float shift = currentPosition();
     if (limits_configured)
     {
-        MotionLimits translated = limits_;
-        translated.min_deg -= shift;
-        translated.max_deg -= shift;
-        if (!validLimits(translated))
+        const float new_min = limits_.min_deg - shift;
+        const float new_max = limits_.max_deg - shift;
+        if (!std::isfinite(new_min) || !std::isfinite(new_max) || new_min >= new_max)
             return Result::InvalidParameters;
-        limits_ = translated;
-        min_deg = translated.min_deg;
-        max_deg = translated.max_deg;
+        limits_.min_deg = new_min;
+        limits_.max_deg = new_max;
+        min_deg = new_min;
+        max_deg = new_max;
     }
-    motor_.resetAngle(); // MCU software coordinate only; never writes the motor's saved zero.
-    controller_.getPID().reset();
-    trajectory_.stop();
-    controller_.setRef(0.0f);
+    // Preserve the driver's absolute coordinate; MIT references must include this origin.
+    zero_output_deg_ = motor_.getAngle();
+    holdPosition(0.0f);
     position_deg = 0.0f;
-    target_deg = 0.0f;
-    accepted_target_deg = 0.0f;
     zeroed = true;
-    busy = false;
-    motion_complete = false;
     stable_samples_ = 0;
     return Result::Ok;
 }
@@ -213,31 +259,22 @@ Result DMPositionTest::enableOutput()
         return Result::InvalidParameters;
     if (stable_samples_ < StableSamples || std::fabs(motor_.getVelocity()) > control_.stationary_rpm)
         return Result::NotStationary;
-    if (!inRange(motor_.getAngle()))
+    const float current = currentPosition();
+    if (!inRange(current) || !validReference(current, 0.0f))
         return Result::OutsideLimits;
-    controller_.getPID().reset();
-    motor_.setCurrent(0.0f); // Clear any stale MIT reference before requesting enable.
-    if (!trajectory_.enable())
-    {
-        motor_.disable();
-        return Result::NotEnabled;
-    }
-    // stop() alone does not update the controller reference or PD history.
-    trajectory_.errorUpdate();
-    controller_.setRef(0.0f);
-    target_deg = motor_.getAngle();
-    accepted_target_deg = target_deg;
+    holdPosition(current);
     enable_requested_ = true;
     enable_pending = true;
+    enable_phase_ = EnablePhase::Preload;
     enable_wait_ticks_ = WATCHDOG_SNACKS;
-    busy = false;
-    motion_complete = false;
     fault = false;
-    return Result::Ok; // Accepted; enable_pending waits for an enabled feedback frame.
+    return Result::Ok; // Accepted; TIM6 preloads and requests enable, RX confirms it.
 }
 
 Result DMPositionTest::move(float target)
 {
+    float start;
+    velocity_profile::SCurveProfile::Config config{};
     {
         ISRGuard guard;
         if (!motor_.isConnected())
@@ -246,22 +283,25 @@ Result DMPositionTest::move(float target)
             return Result::NotEnabled;
         if (busy)
             return Result::Busy;
-        if (!inRange(target) || !inRange(motor_.getAngle()))
+        if (!inRange(target) || !inRange(currentPosition()) || !validReference(target, 0.0f))
             return Result::OutsideLimits;
-        if (std::fabs(motor_.getVelocity()) > control_.stationary_rpm)
+        if (std::fabs(motor_.getVelocity()) > control_.stationary_rpm ||
+            std::fabs(currentPosition() - reference_deg) > control_.finish_deg)
             return Result::NotStationary;
-        trajectory_.stop();
+        start = reference_deg;
+        config = {limits_.max_velocity_deg_s, limits_.max_acceleration_deg_s2,
+                  limits_.max_jerk_deg_s3};
     }
-    // Existing library solves the curve outside the interrupt critical section.
-    const bool planned = trajectory_.setTarget(target);
+    // One existing solver, no external PID; solving does not mask interrupts.
+    const velocity_profile::SCurveProfile planned(config, start, 0.0f, 0.0f, target);
     ISRGuard guard;
     if (fault || !enable_requested_ || !motor_.isConnected())
-    {
-        trajectory_.disable();
         return Result::Offline;
-    }
-    if (!planned)
+    if (!planned.success() || !std::isfinite(planned.getTotalTime()) || planned.getTotalTime() < 0)
         return Result::PlanningFailed;
+    profile_ = planned;
+    elapsed_s_ = 0.0f;
+    duration_s_ = planned.getTotalTime();
     target_deg = target;
     accepted_target_deg = target;
     busy = true;
@@ -302,13 +342,7 @@ void DMPositionTest::commandUpdate()
                 outcome = Result::NotEnabled;
             else
             {
-                trajectory_.stop();
-                trajectory_.errorUpdate();
-                controller_.setRef(0.0f);
-                busy = false;
-                motion_complete = false;
-                target_deg = motor_.getAngle();
-                accepted_target_deg = target_deg;
+                holdPosition(currentPosition());
                 outcome = Result::Ok;
             }
             break;
@@ -322,73 +356,80 @@ void DMPositionTest::commandUpdate()
     command_active_ = false;
 }
 
-void DMPositionTest::transmitFailed()
-{
-    disableOutput(true);
-    result = Result::TransmitFailed;
-}
-
 void DMPositionTest::profileUpdate()
 {
-    if (!command_active_ && enable_requested_ && !enable_pending && !fault)
-    {
-        trajectory_.profileUpdate(0.01f);
-        if (busy && trajectory_.isFinished() && motor_.isConnected() &&
-            std::fabs(motor_.getVelocity()) <= control_.stationary_rpm)
-        {
-            busy = false;
-            motion_complete = true;
-        }
-    }
-}
-
-void DMPositionTest::errorUpdate()
-{
-    if (!command_active_ && enable_requested_ && !enable_pending && !fault)
-        trajectory_.errorUpdate();
-}
-
-void DMPositionTest::controllerUpdate()
-{
-    observeFeedback();
-    if (enable_pending)
-    {
-        if (enable_wait_ticks_ != 0)
-            --enable_wait_ticks_;
-        else
-        {
-            disableOutput(true);
-            result = Result::MotorFault;
-        }
-    }
-    if (!enable_requested_ || fault)
-    {
-        motor_.sendDisableFrame();
-        commanded_torque_nm = 0.0f;
+    if (command_active_ || !enable_requested_ || enable_pending || fault || !busy || !profile_)
         return;
-    }
-    if (limits_configured && !inRange(motor_.getAngle()))
+    elapsed_s_ = std::min(elapsed_s_ + 0.01f, duration_s_);
+    const float position = elapsed_s_ >= duration_s_ ? accepted_target_deg : profile_->CalcX(elapsed_s_);
+    const float velocity = elapsed_s_ >= duration_s_ ? 0.0f : profile_->CalcV(elapsed_s_);
+    if (!inRange(position) || !validReference(position, velocity))
     {
         disableOutput(true);
         result = Result::OutsideLimits;
         return;
     }
-    if (enable_pending)
-    {
-        motor_.setCurrent(0.0f);
-        return;
-    }
-    if (command_active_)
-    {
-        motor_.setCurrent(commanded_torque_nm);
-        return;
-    }
-    trajectory_.controllerUpdate();
-    commanded_torque_nm = controller_.getPID().getOutput();
-    if (!std::isfinite(commanded_torque_nm))
+    reference_deg = position;
+    reference_velocity_deg_s = velocity;
+}
+
+void DMPositionTest::sendReference(float torque_ff)
+{
+    const float position = reference_deg;
+    const float velocity = reference_velocity_deg_s;
+    if (!validReference(position, velocity))
     {
         disableOutput(true);
-        result = Result::InvalidParameters;
+        result = Result::OutsideLimits;
+        return;
     }
+    // setInternalMIT applies direction and deg->rad. It does not add the software
+    // origin or S3519's position scale, so perform only that coordinate adaptation.
+    motor_.setInternalMIT(torque_ff, (zero_output_deg_ + position) * position_scale_,
+                          velocity * velocity_scale_, control_.kp, control_.kd);
+    commanded_torque_ff_nm = torque_ff; // Feedforward only, not total motor torque.
+}
+
+void DMPositionTest::sendUpdate()
+{
+    if (!enable_requested_ || fault)
+    {
+        motor_.sendDisableFrame();
+        commanded_torque_ff_nm = 0.0f;
+        return;
+    }
+    if (!motor_.isConnected())
+    {
+        disableOutput(true);
+        result = Result::Offline;
+        return;
+    }
+    if (!inRange(currentPosition()))
+    {
+        disableOutput(true);
+        result = Result::OutsideLimits;
+        return;
+    }
+    if (enable_phase_ == EnablePhase::Preload)
+    {
+        preload_feedback_count_ = feedback_count;
+        sendReference(0.0f);
+        if (!fault)
+            enable_phase_ = EnablePhase::WaitPreload;
+    }
+    else if (enable_phase_ == EnablePhase::SendEnable)
+    {
+        (void)motor_.enable();
+        enable_phase_ = EnablePhase::WaitEnable;
+        enable_wait_ticks_ = WATCHDOG_SNACKS;
+    }
+    else
+        sendReference(enable_pending ? 0.0f : control_.torque_ff_nm);
+}
+
+void DMPositionTest::transmitFailed()
+{
+    disableOutput(true);
+    result = Result::TransmitFailed;
 }
 } // namespace device

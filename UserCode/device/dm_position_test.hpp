@@ -1,9 +1,9 @@
 #pragma once
 
 #include "dm.hpp"
-#include "motor_trajectory.hpp"
-#include "motor_vel_controller.hpp"
+#include "s_curve.hpp"
 #include <cstdint>
+#include <optional>
 
 namespace device
 {
@@ -19,14 +19,15 @@ enum class Result : std::uint32_t
     MotorFault = 8, PlanningFailed = 9, InvalidCommand = 10, TransmitFailed = 11
 };
 
-// Captured at construction; all zero defaults deliberately prevent enable.
-// Velocity PID: input rpm, output Nm. Position PD: input deg, output deg/s.
+// MIT packet coefficients, not MCU PID gains. Copied at construction.
+// Low-gain starting values only: no assertion of loaded mechanical stability.
 struct ControlParameters
 {
-    PIDMotor::Config velocity_pid{};
-    PD::Config position_pd{};
-    float finish_deg{0.0f};
-    float stationary_rpm{0.0f};
+    float kp{5.0f};
+    float kd{0.5f};
+    float torque_ff_nm{0.0f};
+    float finish_deg{0.3f};
+    float stationary_rpm{0.1f};
 };
 
 struct MotionLimits
@@ -38,22 +39,26 @@ struct MotionLimits
     float max_jerk_deg_s3{};
 };
 
-/** Project-specific composition, following the reference Lift/Flip device structure.
- * No hardware startup, task creation or motor parameter writes in the constructor.
- * The motor, velocity controller and trajectory have the same permanent lifetime.
- * Construction copies fixed gains and arrival tolerances. Changing app configuration
- * after construction does not retune this object: change fixed parameters before Init
- * or rebuild/restart. Only MotionLimits are runtime-configurable via ApplyLimits.
- * Zero gains, zero output caps or zero tolerances inhibit enable; no tuning is assumed.
- * Motor configuration must be MIT; setCurrent carries Nm with MIT Kp=Kd=0. The motor
- * itself must already be configured by the operator; this object never changes mode.
- * Protocol caps come from this motor's Config, not shared J4340 defaults. In particular
- * S3519 position feedback is normalized by the existing driver; reduction_rate remains
- * the external transmission ratio only. Protocol caps are not mechanical safety limits.
- * All ISR callers must share one non-preempting priority. Task operations use short
- * ISRGuard sections; long trajectory solving gates this device's library updates,
- * not CAN reception or the other five devices. Its last bounded torque is held
- * during that short command operation; loss/fault still requests disable.
+/** Project-specific six-motor test device: DMMotor + existing SCurveProfile.
+ * No external position PD/velocity PID, no hidden hardware startup or heap allocation.
+ *
+ * Logical positions are output-shaft degrees relative to the software zero. The
+ * driver's getAngle() is never reset: zero_output_deg_ preserves its absolute origin
+ * so every MIT p_des is an absolute reference in the motor's protocol coordinate.
+ * Per the user's tested firmware, S3519 position feedback is pre-reduction and the
+ * existing driver normalizes by 19.203. Invert that same normalization for MIT p_des;
+ * do not change the library or apply the internal ratio to external reduction_rate.
+ * Velocity follows the existing driver's output-shaft feedback contract; MIT v_des
+ * uses deg/s, not rpm. Position and velocity thus have separate protocol scales.
+ *
+ * Command solving runs in the polling task, sampling in TIM7 (100 Hz), feedback and
+ * status updates in TIM3 (500 Hz), MIT output in TIM6 (500 Hz). All three timers and
+ * CAN RX share one non-preempting priority. Task state handoffs use short ISRGuards;
+ * curve solving does not mask interrupts, and the previous reference remains valid.
+ *
+ * Enable first preloads a hold reference while disabled, then requests enable; only
+ * fresh feedback confirms state. Faults cancel motion and request disable with no
+ * auto-restart. Software limits and protocol bounds do not provide hardware safety.
  */
 class DMPositionTest final
 {
@@ -63,61 +68,73 @@ public:
     DMPositionTest(const DMPositionTest&) = delete;
     DMPositionTest& operator=(const DMPositionTest&) = delete;
 
-    void commandUpdate();                 // Ozone polling task; curve solving is here.
-    void transmitFailed();               // TX was not submitted; latch and request disable.
-    void profileUpdate();                 // TIM7: 100 Hz, dt = 0.01 s.
-    void errorUpdate();                   // TIM3: 500 Hz, discrete position PD.
-    void controllerUpdate();              // TIM6: 500 Hz, discrete velocity PID + CAN.
-    void feedbackReceived() noexcept;     // Called after the driver's receive callback.
+    void commandUpdate();             // Ozone task: commands and new S-curve solving.
+    void profileUpdate();             // TIM7: sample position + velocity, dt=0.01 s.
+    void feedbackUpdate();            // TIM3: new feedback, readiness/faults/arrival.
+    void sendUpdate();                // TIM6: one MIT/control frame per motor.
+    void transmitFailed();            // Called when no frame reached the hardware FIFO.
+    void feedbackReceived() noexcept; // Called after the driver's receive callback.
 
     volatile Command command{Command::None};
     volatile Result result{Result::Ok};
-    volatile float target_deg{0.0f};       // Absolute relative to this boot's software zero.
-    volatile float min_deg{0.0f};          // Staged values; ApplyLimits commits together.
+    volatile float target_deg{0.0f};
+    volatile float min_deg{0.0f};
     volatile float max_deg{0.0f};
     volatile float max_velocity_deg_s{0.0f};
     volatile float max_acceleration_deg_s2{0.0f};
     volatile float max_jerk_deg_s3{0.0f};
 
-    volatile float accepted_target_deg{0.0f}; // Last accepted target, not staged Ozone input.
-    // Observations, not command inputs. Acceptance, enable feedback and arrival differ.
+    volatile float accepted_target_deg{0.0f};
     volatile bool connected{false};
     volatile bool zeroed{false};
     volatile bool limits_configured{false};
-    volatile bool enabled{false};          // Latest valid feedback says enabled.
+    volatile bool enabled{false};
     volatile bool enable_pending{false};
     volatile bool busy{false};
-    volatile bool motion_complete{false};  // Only normal arrival sets true.
-    volatile bool fault{false};            // No automatic restart after a fault.
+    volatile bool motion_complete{false};
+    volatile bool fault{false};
     volatile float position_deg{0.0f};
     volatile float velocity_rpm{0.0f};
     volatile float torque_nm{0.0f};
-    volatile float commanded_torque_nm{0.0f};
+    volatile float reference_deg{0.0f};
+    volatile float reference_velocity_deg_s{0.0f};
+    volatile float commanded_torque_ff_nm{0.0f};
     volatile std::uint32_t motor_state{0};
     volatile std::uint32_t feedback_count{0};
 
 private:
+    enum class EnablePhase { None, Preload, WaitPreload, SendEnable, WaitEnable };
     [[nodiscard]] bool validControl() const noexcept;
     [[nodiscard]] bool validLimits(const MotionLimits& limits) const noexcept;
     [[nodiscard]] bool inRange(float position) const noexcept;
+    [[nodiscard]] bool validReference(float position, float velocity) const noexcept;
+    [[nodiscard]] float currentPosition() const noexcept;
     void disableOutput(bool latch_fault);
-    void observeFeedback();
+    void holdPosition(float position) noexcept;
+    void sendReference(float torque_ff);
     [[nodiscard]] Result applyLimits();
     [[nodiscard]] Result setZero();
     [[nodiscard]] Result enableOutput();
     [[nodiscard]] Result move(float target);
 
     motors::DMMotor motor_;
-    controllers::MotorVelController controller_;
-    trajectory::MotorTrajectory<1> trajectory_;
     ControlParameters control_;
-    float position_lsb_deg_;
+    MotionLimits limits_{};
+    std::optional<velocity_profile::SCurveProfile> profile_{};
+    float position_scale_;
+    float velocity_scale_;
+    float protocol_max_position_deg_;
     float protocol_max_velocity_deg_s_;
     float protocol_max_torque_nm_;
-    MotionLimits limits_{};
-    bool command_active_{false};          // Access only under ISRGuard or same-priority ISR.
+    float position_lsb_deg_;
+    float zero_output_deg_{0.0f};
+    float elapsed_s_{0.0f};
+    float duration_s_{0.0f};
+    bool command_active_{false};
     bool enable_requested_{false};
     bool ever_connected_{false};
+    EnablePhase enable_phase_{EnablePhase::None};
+    std::uint32_t preload_feedback_count_{0};
     std::uint32_t observed_feedback_count_{0};
     unsigned enable_wait_ticks_{0};
     unsigned stable_samples_{0};

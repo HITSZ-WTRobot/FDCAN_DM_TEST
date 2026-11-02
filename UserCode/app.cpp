@@ -5,10 +5,17 @@
 #include "tim.h"
 #include "watchdog.hpp"
 
-// Fixed control parameters, copied during construction. All 0.0f as requested.
-// Set valid values here and rebuild, or set them in Ozone BEFORE motor_init().
-// PID input rpm/output Nm; position PD output deg/s; gains are discrete at 500 Hz.
-device::ControlParameters dm_control[6]{};
+// Fixed MIT packet parameters, copied at construction; no MCU position/velocity PID.
+// Kp=5.0, Kd=0.5, t_ff=0 are low-gain starting values, not validated loaded tuning.
+// Feedback stationarity thresholds account for each image's velocity quantization.
+device::ControlParameters dm_control[6]{
+    {.stationary_rpm = 1.1f}, // [0] 右前伸缩：VMAX=200，反馈一步约0.933 rpm。
+    {.stationary_rpm = 1.1f}, // [1] 中伸缩。
+    {.stationary_rpm = 1.1f}, // [2] 后伸缩。
+    {.stationary_rpm = 0.1f}, // [3] 左前旋转：VMAX=10，反馈一步约0.0467 rpm。
+    {.stationary_rpm = 1.1f}, // [4] 左前伸缩。
+    {.stationary_rpm = 0.1f}  // [5] 右前旋转。
+};
 
 bsp::can::Can* dm_can = nullptr;
 device::DMPositionTest* dm_motors[6]{}; // 索引及部位见下方 motor_parameters；Master ID=0x20。
@@ -34,35 +41,38 @@ static constexpr MotorParameters motor_parameters[6]{
     {0x0F, motors::DMMotor::Type::J4340_2EC, 12.5f,  10.0f, 28.0f}  // [5] 右前旋转电机，DM-J4340P
 };
 
-/* Ozone 操作：
+/* Ozone 操作（MIT直接跟踪，未在MCU建立外部位置环或速度环）：
  * 实物须先设为MIT；CAN ID、型号和量程按motor_parameters，Master ID统一为0x20。
- * 图中CAN Timeout均为0，不能依赖电机端通信超时自动停机；本程序不改写该参数。
- * 仲裁1M/数据5M、FD+BRS按用户决定暂定；电机兼容性、方向和稳定性未实板验证。
- * dm_control[0..5]在构造时复制：修改后须重启，或在motor_init之前通过Ozone填写。
- * velocity_pid={Kp,Ki,Kd,abs_output_max}，输入rpm，输出/上限Nm；
- * position_pd={Kp,Kd,abs_output_max}，输入deg，补偿输出deg/s；
- * finish_deg是到位误差，stationary_rpm是静止速度阈值；两环均500Hz，不另乘除dt。
- * 目前全部为0.0：拒绝使能；静止阈值为0时也不自动设零，避免猜测机构参数。
+ * 图中CAN Timeout均为0，不能依赖电机端超时自动停机；本程序不改写该参数。
+ * 仲裁1M/数据5M、FD+BRS保持已确认配置，实板收发与稳定性仍须验证。
+ * dm_control在构造时复制；改完重启，或在motor_init之前通过Ozone填写。
+ * kp/kd是每条MIT帧发送的增益，不是速度KP/KI；初值5.0/0.5，torque_ff_nm=0。
+ * 电机执行内部MIT控制。前馈只是附加力矩，不是总输出力矩限制；当前位置误差
+ * 仍会产生保持力矩。初值不保证带载稳定或重力补偿，须支撑机构并逐台微调。
+ * finish_deg=0.3为到位观察阈值；stationary_rpm按两种协议速度分辨率设置，
+ * 均不是机械保护参数。kp/kd非法或为0时拒绝使能；机械运动限值仍必须由用户填写。
  *
- * 1. dm_startup=Ready后，设备仍失能。静止阈值有效、50次新的失能反馈位置
- *    变化在两倍协议分辨率内时，各电机自动建立本次启动的软件零点。
+ * 1. dm_startup=Ready后保持失能；50次新的失能且静止反馈，在两倍位置协议
+ *    分辨率内稳定后建立本次启动的软件零点。驱动内部绝对坐标不清零。
+ *    S3519依用户实测保留减速前位置口径：反馈由库除19.203，发送位置参考
+ *    在接入层换回原口径；速度仍按库的输出轴反馈契约，不再叠加内置减速比。
  * 2. 展开dm_motors[0..5]，确认zeroed=true、command=None，填写min_deg、max_deg、
- *    max_velocity_deg_s、max_acceleration_deg_s2、max_jerk_deg_s3，最后写
- *    command=ApplyLimits(6)。限位相对软件零点，必须包含当前实际位置。
- *    轨迹速度受max_velocity_deg_s限制，位置PD还可叠加abs_output_max的速度补偿。
- * 3. 等command回到None、result=Ok，再写Enable(2)；等待connected=true、
- *    enable_pending=false、enabled=true、fault=false，不把命令受理当成已使能。
- * 4. 先填target_deg，再写Move(4)；accepted_target_deg是实际接受的目标。
- *    运动中Move返回Busy，不替换旧轨迹。每条命令等command=None后再提交。
+ *    max_velocity_deg_s、max_acceleration_deg_s2、max_jerk_deg_s3，最后写ApplyLimits(6)。
+ *    限位相对软件零点；整个范围还须能编码为绝对MIT位置，超出PMAX拒绝而非静默截断。
+ * 3. 等command=None、result=Ok，再写Enable(2)。先预装当前位置保持参考，
+ *    再请求使能；等待connected=true、enable_pending=false、enabled=true、fault=false。
+ * 4. 先填target_deg，再写Move(4)。观察accepted_target_deg、reference_deg和
+ *    reference_velocity_deg_s。运动中Move返回Busy，不替换原轨迹。
+ *    任务只求解新曲线；TIM7以100Hz推进位置/速度参考；TIM3以500Hz处理反馈、
+ *    到位、零点与故障；TIM6以500Hz发送MIT五元组。重复参考不代表新增轨迹样本。
  * 5. 正常到位看motion_complete；busy=false也可能是Stop/Disable/故障。
  *    Stop(5)取消曲线并保持当前位置，不是S曲线减速停车；Disable(3)请求失能。
  *    失能确认须connected=true且新的motor_state=0，断线不能证明实际已停。
- * 6. SetZero(1)仅在失能、静止且反馈有效时接受，不写电机Flash；已应用限位
- *    随软件零点平移，保持原物理范围。故障后不自动恢复，须排除原因后人工Enable。
- * 7. 发送统计只代表提交到硬件FIFO，不代表电机执行。暂停CPU/单步会中断控制
- *    和发包，须先失能并支撑机构；软件保护不代替机械支撑、硬件急停或电机超时设置。
- * 验证：固件编译和真实app/驱动/SCurve/PD/PID主机烟测通过；主机CAN/HAL/RTOS
- * 边界和机构为模拟，不证明实物收发、方向、稳定性或机械安全。未烧录、未操作实物。
+ * 6. SetZero(1)仅在失能、静止且反馈有效时接受，不写电机Flash；原限位同步
+ *    平移保持物理范围，MIT绝对保持目标不因软件置零而跳变。故障后须人工Enable。
+ * 7. commanded_torque_ff_nm只表示MIT附加前馈；实际总力矩看torque_nm反馈。
+ *    TX统计只代表提交到硬件FIFO，不代表执行。暂停CPU/单步前先失能并支撑机构；
+ *    软件保护不代替机械支撑、硬件急停或电机超时设置。未烧录、未操作实物。
  */
 
 enum class Startup : std::uint32_t
@@ -96,8 +106,8 @@ static void motor_init()
             .tor_max = parameters.torque_max_nm,
             .auto_zero = false, // Device waits for genuinely new, stationary feedback.
             .reverse = false,
-            // reduction_rate只表示外接减速；S3519的位置换算由驱动Type负责。
-            // 不把图片中的内置19.2032或40再次叠加到外接减速比。
+            // reduction_rate仅表示外接减速；S3519反馈归一化仍由现有Type路径负责。
+            // MIT位置参考的逆向坐标换算在设备层完成，不修改公共驱动。
             .reduction_rate = 1.0f,
             .can_fd_brs = true
         };
@@ -157,20 +167,20 @@ static void motorProfileUpdate(TIM_HandleTypeDef*) // TIM7, 100 Hz.
         motor->profileUpdate();
 }
 
-static void motorErrorUpdate(TIM_HandleTypeDef*) // TIM3, 500 Hz.
-{
-    for (auto* motor : dm_motors)
-        motor->errorUpdate();
-}
-
-static void motorControllerUpdate(TIM_HandleTypeDef*) // TIM6, 500 Hz.
+static void motorFeedbackUpdate(TIM_HandleTypeDef*) // TIM3, 500 Hz.
 {
     // One owner: default watchdog budget 10 ticks -> approximately 20 ms here.
     service::Watchdog::EatAll();
     for (auto* motor : dm_motors)
+        motor->feedbackUpdate();
+}
+
+static void motorMitSendUpdate(TIM_HandleTypeDef*) // TIM6, 500 Hz.
+{
+    for (auto* motor : dm_motors)
     {
         const auto before = dm_can->counters().tx_submitted_frames;
-        motor->controllerUpdate();
+        motor->sendUpdate();
         if (dm_can->counters().tx_submitted_frames == before)
         {
             dm_tx_failures = dm_tx_failures + 1;
@@ -185,8 +195,8 @@ static void motorControllerUpdate(TIM_HandleTypeDef*) // TIM6, 500 Hz.
 static bool tim_init()
 {
     if (HAL_TIM_RegisterCallback(&htim7, HAL_TIM_PERIOD_ELAPSED_CB_ID, motorProfileUpdate) != HAL_OK ||
-        HAL_TIM_RegisterCallback(&htim3, HAL_TIM_PERIOD_ELAPSED_CB_ID, motorErrorUpdate) != HAL_OK ||
-        HAL_TIM_RegisterCallback(&htim6, HAL_TIM_PERIOD_ELAPSED_CB_ID, motorControllerUpdate) != HAL_OK)
+        HAL_TIM_RegisterCallback(&htim3, HAL_TIM_PERIOD_ELAPSED_CB_ID, motorFeedbackUpdate) != HAL_OK ||
+        HAL_TIM_RegisterCallback(&htim6, HAL_TIM_PERIOD_ELAPSED_CB_ID, motorMitSendUpdate) != HAL_OK)
     {
         dm_startup = Startup::TimerCallbackFailed;
         return false;
