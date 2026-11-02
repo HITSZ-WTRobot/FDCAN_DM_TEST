@@ -52,7 +52,8 @@ struct MotionLimits
  * uses deg/s, not rpm. Position and velocity thus have separate protocol scales.
  *
  * Command solving runs in the polling task, sampling in TIM7 (100 Hz), feedback and
- * status updates in TIM3 (500 Hz), MIT output in TIM6 (500 Hz). All three timers and
+ * status updates in TIM3 (500 Hz). TIM6 runs at 1 kHz and alternates two groups of
+ * three; each motor keeps a 500 Hz TX slot. All three timers and
  * CAN RX share one non-preempting priority. Task state handoffs use short ISRGuards;
  * curve solving does not mask interrupts, and the previous reference remains valid.
  *
@@ -65,6 +66,9 @@ struct MotionLimits
  * Enable first preloads a hold reference while disabled, then requests enable; only
  * fresh feedback confirms state. Faults cancel motion and request disable with no
  * auto-restart. Software limits and protocol bounds do not provide hardware safety.
+ * Only the sendUpdate path submits CAN frames, at most one attempt per invocation.
+ * Commands, feedback/profile faults and transmitFailed only change requested state;
+ * disable is submitted in the next assigned slot, not as an out-of-band burst.
  */
 class DMPositionTest final
 {
@@ -77,8 +81,8 @@ public:
     void commandUpdate();             // Ozone task: commands and new S-curve solving.
     void profileUpdate();             // TIM7: sample position + velocity, dt=0.01 s.
     void feedbackUpdate();            // TIM3: new feedback, readiness/faults/arrival.
-    void sendUpdate();                // TIM6: one MIT/control frame per motor.
-    void transmitFailed();            // Called when no frame reached the hardware FIFO.
+    void sendUpdate();                // TIM6: selected group only, one frame attempt/2 ms.
+    void transmitFailed();            // Latch fault; no immediate retry or CAN submission.
     void feedbackReceived() noexcept; // Called after the driver's receive callback.
 
     volatile Command command{Command::None};

@@ -84,7 +84,6 @@ void DMPositionTest::holdPosition(float position) noexcept
 void DMPositionTest::disableOutput(bool latch_fault)
 {
     holdPosition(currentPosition());
-    motor_.disable();
     commanded_torque_ff_nm = 0.0f;
     enable_requested_ = false;
     enable_pending = false;
@@ -93,6 +92,7 @@ void DMPositionTest::disableOutput(bool latch_fault)
     if (latch_fault)
         fault = true;
     // Do not declare physical disable: fresh feedback must confirm it.
+    // State change only. CAN output belongs exclusively to this motor's next TX slot.
 }
 
 void DMPositionTest::feedbackUpdate()
@@ -385,6 +385,7 @@ void DMPositionTest::sendReference(float torque_ff)
     {
         disableOutput(true);
         result = Result::OutsideLimits;
+        motor_.disable(); // Already inside the TX slot: submit exactly one disable frame.
         return;
     }
     // setInternalMIT applies direction and deg->rad. It does not add the software
@@ -398,7 +399,7 @@ void DMPositionTest::sendUpdate()
 {
     if (!enable_requested_ || fault)
     {
-        motor_.sendDisableFrame();
+        motor_.disable();
         commanded_torque_ff_nm = 0.0f;
         return;
     }
@@ -406,12 +407,14 @@ void DMPositionTest::sendUpdate()
     {
         disableOutput(true);
         result = Result::Offline;
+        motor_.disable();
         return;
     }
     if (!inRange(currentPosition()))
     {
         disableOutput(true);
         result = Result::OutsideLimits;
+        motor_.disable();
         return;
     }
     if (enable_phase_ == EnablePhase::Preload)

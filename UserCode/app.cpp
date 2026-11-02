@@ -77,7 +77,8 @@ static constexpr device::MotionLimits default_motion_limits[6]{
  * 4. 先填target_deg，再写Move(4)。观察accepted_target_deg、reference_deg和
  *    reference_velocity_deg_s。运动中Move返回Busy，不替换原轨迹。
  *    任务只求解新曲线；TIM7以100Hz推进位置/速度参考；TIM3以500Hz处理反馈、
- *    到位、零点与故障；TIM6以500Hz发送MIT五元组。重复参考不代表新增轨迹样本。
+ *    到位、零点与故障；TIM6以1kHz轮换发送两组三台，每台仍500Hz。
+ *    使能、失能和故障停机也走各自发送时隙；实际线上时刻仍受CAN仲裁/重发影响。
  * 5. 正常到位看motion_complete；busy=false也可能是Stop/Disable/故障。
  *    Stop(5)取消曲线并保持当前位置，不是S曲线减速停车；Disable(3)请求失能。
  *    失能确认须connected=true且新的motor_state=0，断线不能证明实际已停。
@@ -194,10 +195,16 @@ static void motorFeedbackUpdate(TIM_HandleTypeDef*) // TIM3, 500 Hz.
         motor->feedbackUpdate();
 }
 
-static void motorMitSendUpdate(TIM_HandleTypeDef*) // TIM6, 500 Hz.
+static void motorMitSendUpdate(TIM_HandleTypeDef*) // TIM6, 1 kHz; each motor 500 Hz.
 {
-    for (auto* motor : dm_motors)
+    // Unique TX owner: A=[0,1,2] (0A/0B/0C), B=[3,4,5] (0D/0E/0F).
+    // Alternating hardware ticks separate submissions by 1 ms without busy-waits.
+    static unsigned next_group = 0;
+    const unsigned first = next_group * 3U;
+    next_group ^= 1U;
+    for (unsigned i = first; i < first + 3U; ++i)
     {
+        auto* motor = dm_motors[i];
         const auto before = dm_can->counters().tx_submitted_frames;
         motor->sendUpdate();
         if (dm_can->counters().tx_submitted_frames == before)
@@ -209,6 +216,7 @@ static void motorMitSendUpdate(TIM_HandleTypeDef*) // TIM6, 500 Hz.
     const auto traffic = dm_can->counters();
     dm_rx_frames = traffic.rx_frames;
     dm_tx_submitted_frames = traffic.tx_submitted_frames;
+    
 }
 
 static bool tim_init()
