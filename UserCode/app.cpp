@@ -87,7 +87,8 @@ static constexpr device::MotionLimits default_motion_limits[6]{
  *    平移保持物理范围，MIT绝对保持目标不因软件置零而跳变。故障后须人工Enable。
  * 7. commanded_torque_ff_nm只表示MIT附加前馈；实际总力矩看torque_nm反馈。
  *    TX统计只代表提交到硬件FIFO，不代表执行。暂停CPU/单步前先失能并支撑机构；
- *    软件保护不代替机械支撑、硬件急停或电机超时设置。未烧录、未操作实物。
+ *    软件保护不代替机械支撑、硬件急停或电机超时设置。用户已确认烧录测试可行，
+ *    工具未直接操作目标；未提供的负载/工况和安全性不作扩大保证。
  */
 
 enum class Startup : std::uint32_t
