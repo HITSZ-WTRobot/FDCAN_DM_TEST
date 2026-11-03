@@ -8,5 +8,7 @@ ioc_file = "DMDebug.ioc"
 packages = [
     "MotorDrivers::DM",
     "Trajectory::MotorTrajectory",
+    "libs::CRC",
+    "memory::DMABuffer",
     "memory::StaticObject",
 ]
