@@ -30,7 +30,7 @@ S3519 位置口径保留用户此前实测及上游驱动的处理：反馈位�
 
 | 执行位置 | 频率 | 用途 |
 |---|---:|---|
-| 命令任务 | 约 10 ms 轮询 | 处理 Ozone 命令、求解新曲线 |
+| 命令任务 | 约 1 ms 服务 | 处理串口/Ozone 命令、求解新曲线；不是轨迹时基 |
 | TIM7 | 100 Hz | 推进轨迹位置和速度参考 |
 | TIM3 | 500 Hz | 更新反馈、软件零点、到位和故障状态；唯一软件 Watchdog 推进者 |
 | TIM6 | 2 kHz | 每次交替发送三台；每台名义更新 1 kHz |
@@ -86,6 +86,15 @@ MIT 初始参数为 `kp=5.0`、`kd=0.5`、`torque_ff_nm=0.0`，到位误差阈�
 上电不会自动使能。每台在收到 50 次新的失能、静止且位置稳定的反馈后建立软件零点，自动检查并应用默认运动限值。如果整个默认范围在当前绝对零点下超出 PMAX，保留 `limits_configured=false` 并拒绝使能，不静默截断或改写 PMAX。S3519 当前输出轴绝对可编码范围约 ±37.3°，不因机械可旋转 360° 而扩大。
 
 固定 MIT 参数入口为 [UserCode/app.cpp](UserCode/app.cpp) 的 `dm_control`，在设备构造时复制；初始化后只改数组不会在线生效。修改代码、构建并安全重启，或在初始化前设置。机械运动限值则支持失能状态下通过 Ozone 覆盖。
+
+## 串口上位机控制
+
+完整交接文档：[SERIAL_PROTOCOL.md](SERIAL_PROTOCOL.md)，包含接线、固定 64 B 二进制帧、CRC、命令与状态布局、序号重发、错误码、断线策略和 Python 参考编解码/黄金帧。
+
+USART1 使用 PA9 TX / PA10 RX、115200/8N1；RX DMA1 Stream0 Circular、TX Stream1 Normal，相关 IRQ 优先级均为 6。上位机采用单请求停等，支持六台状态、单台使能/位置轨迹/软件零点/限值，以及逐台或全台停止/失能。原 Ozone 入口保留，不会被串口自动切成只读；待处理 Ozone 命令优先，串口动作返回 Busy 而不覆盖。
+
+首个有效串口请求启动会话；建议每 100 ms 心跳。500 ms 无有效请求会取消六台轨迹、锁存 fault 并请求失能；必须新 Heartbeat 恢复链路授权，再由操作者明确使能，不自动续跑。实际失能仍需反馈确认，软件断线处理不是硬件急停。串口状态与动作 ACK 分离，Ok 不表示已经使能或到位；参数仅 RAM 生效。
+
 
 ## Ozone 测试步骤
 
@@ -172,11 +181,13 @@ command=0，result=0
 - 本轮验证使用未修改的上游 DM 驱动、真实应用与 SCurve，CAN/HAL/RTOS 和机构使用主机模型：覆盖独立反馈 ID、交叉/异常帧拒收、旧 Master ID 拒绝连接、六台独立到位和故障处理。
 - TIM6 2 kHz 的主机时序验证覆盖 32,820 个发送时隙：每次三台、两组交替；健康的一秒窗口每台提交 1,000 帧。不模拟真实位级仲裁、重发或电气故障，不能代替实板波形与负载检查。
 - 实板结果：用户反馈“代码已经烧录并测试过可行了”；工具未直接操作目标，也未为重复确认该结果重跑硬件测试。当前 Debug 构建及主机烟测通过，烟测为本轮临时验证，不是仓库提供的独立测试命令。
+- 本轮新增串口路径已交叉构建，并在 ASan/UBSan 主机边界模型中运行真实 UART 适配、CRC/命令服务、DM 和 SCurve：覆盖重同步、广播状态、Ozone 仲裁、重复序号、运动到位、500 ms 失能/人工恢复、RX 溢出和 TX DMA 错误。前述用户实板可行反馈针对原电机版本，不证明新增串口已实测；本轮未操作实板或上位机工程。
 
 ## 目录和维护
 
 - [UserCode/app.cpp](UserCode/app.cpp)：参数、设备部位映射、初始化、任务及薄定时调度。
 - [UserCode/device/dm_position_test.hpp](UserCode/device/dm_position_test.hpp)、[实现](UserCode/device/dm_position_test.cpp)：命令、软件零点、运动限值、轨迹与 MIT 输出。
+- [UserCode/communication/](UserCode/communication/)：固定帧/CRC 编解码、UART DMA 生命周期、上位机命令仲裁及状态应答；协议见 [SERIAL_PROTOCOL.md](SERIAL_PROTOCOL.md)。
 - [DMDebug.ioc](DMDebug.ioc)：CubeMX 配置唯一来源。
 - `Modules/`：cpkg 管理的 Git 子模块；本工程只调用上游接口，不维护私改驱动副本。
 - `cmake/`：已跟踪工具链和构建接入；生成内容按忽略规则保留在本地。

@@ -251,6 +251,8 @@ Result DMPositionTest::setZero()
 
 Result DMPositionTest::enableOutput()
 {
+    if (host_link_blocked_)
+        return Result::NotEnabled;
     if (!motor_.isConnected())
         return Result::Offline;
     if (enable_requested_)
@@ -358,6 +360,37 @@ void DMPositionTest::commandUpdate()
     result = outcome;
     command = Command::None;
     command_active_ = false;
+}
+
+Result DMPositionTest::execute(Command requested, float target, const MotionLimits* limits)
+{
+    {
+        ISRGuard guard;
+        if (command_active_ || command != Command::None)
+            return Result::Busy;
+        if (requested == Command::Move)
+            target_deg = target;
+        if (requested == Command::ApplyLimits && limits)
+        {
+            min_deg = limits->min_deg;
+            max_deg = limits->max_deg;
+            max_velocity_deg_s = limits->max_velocity_deg_s;
+            max_acceleration_deg_s2 = limits->max_acceleration_deg_s2;
+            max_jerk_deg_s3 = limits->max_jerk_deg_s3;
+        }
+        command = requested;
+    }
+    commandUpdate();
+    ISRGuard guard;
+    return result;
+}
+
+void DMPositionTest::linkLost()
+{
+    disableOutput(true);
+    command = Command::None;
+    result = Result::Offline;
+    host_link_blocked_ = true;
 }
 
 void DMPositionTest::profileUpdate()

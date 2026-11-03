@@ -78,12 +78,19 @@ public:
     DMPositionTest(const DMPositionTest&) = delete;
     DMPositionTest& operator=(const DMPositionTest&) = delete;
 
-    void commandUpdate();             // Ozone task: commands and new S-curve solving.
+    void commandUpdate();             // Shared UART/Ozone task: commands and new S-curve solving.
     void profileUpdate();             // TIM7: sample position + velocity, dt=0.01 s.
     void feedbackUpdate();            // TIM3: new feedback, readiness/faults/arrival.
     void sendUpdate();                // TIM6: selected group only, one frame attempt/1 ms.
     void transmitFailed();            // Latch fault; no immediate retry or CAN submission.
     void feedbackReceived() noexcept; // Called after the driver's receive callback.
+
+    // Shared task-side command path: reject an existing Ozone command, never overwrite it.
+    Result execute(Command requested, float target = 0.0f, const MotionLimits* limits = nullptr);
+    void linkLost(); // ISR-safe state request; CAN disable still uses the assigned TX slot.
+    void linkRestored() noexcept { host_link_blocked_ = false; } // No automatic enable.
+    ControlParameters controlParameters() const noexcept { return control_; }
+    MotionLimits activeLimits() const noexcept { return limits_; }
 
     volatile Command command{Command::None};
     volatile Result result{Result::Ok};
@@ -142,6 +149,7 @@ private:
     float duration_s_{0.0f};
     bool command_active_{false};
     bool enable_requested_{false};
+    bool host_link_blocked_{false};
     bool ever_connected_{false};
     EnablePhase enable_phase_{EnablePhase::None};
     std::uint32_t preload_feedback_count_{0};

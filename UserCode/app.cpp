@@ -1,4 +1,7 @@
 #include "cmsis_os2.h"
+#include "communication/host_control.hpp"
+#include "memory.hpp"
+#include "usart.h"
 #include "device/dm_position_test.hpp"
 #include "fdcan.h"
 #include "static_object.hpp"
@@ -94,17 +97,25 @@ static constexpr device::MotionLimits default_motion_limits[6]{
 enum class Startup : std::uint32_t
 {
     NotStarted, Ready, TaskFailed, FilterFailed, ReceiveCallbackFailed,
-    DelayCompensationFailed, CanStartFailed, TimerCallbackFailed, TimerStartFailed
+    DelayCompensationFailed, CanStartFailed, TimerCallbackFailed, TimerStartFailed, SerialStartFailed
 };
 volatile Startup dm_startup{Startup::NotStarted};
 volatile std::uint32_t dm_rx_frames{0};
 volatile std::uint32_t dm_tx_submitted_frames{0}; // Hardware submission, not motor execution.
 volatile std::uint32_t dm_tx_failures{0};
+volatile bool host_link_timeout{false};
+volatile std::uint32_t host_crc_errors{0}, host_rx_dropped_bytes{0}, host_uart_errors{0}, host_tx_errors{0};
 
 // Existing fixed-storage package performs explicit placement new. Objects are
 // permanent and never allocate from the project's small C/C++ heap or an ISR.
 static memory::StaticObject<bsp::can::Can> can_storage;
 static memory::StaticObject<device::DMPositionTest> motor_storage[6];
+static MEM_RAM_AXI memory::DMABuffer<512> host_rx_dma;
+static MEM_RAM_AXI memory::DMABuffer<64> host_tx_dma;
+static memory::StaticObject<host::Uart> host_uart_storage;
+static memory::StaticObject<host::Control> host_control_storage;
+static host::Control* host_control = nullptr;
+static host::Uart* host_uart = nullptr;
 
 static void motor_init()
 {
@@ -196,6 +207,7 @@ static void motorFeedbackUpdate(TIM_HandleTypeDef*) // TIM3, 500 Hz.
 {
     // One owner: default watchdog budget 10 ticks -> approximately 20 ms here.
     service::Watchdog::EatAll();
+    host_control->linkTick(HAL_GetTick()); // Host 500ms timeout does not wait for the task.
     for (auto* motor : dm_motors)
         motor->feedbackUpdate();
 }
@@ -250,7 +262,20 @@ static void motorCommandUpdate(void*)
     // Initialization runs on this 4096-byte task stack, not the 512-byte Init stack.
     // Register all six motor callbacks before starting the shared bus or timers.
     motor_init();
-    if (!can_init() || !tim_init())
+    host_uart = INIT_OBJECT(host_uart_storage, huart1, host_rx_dma, host_tx_dma);
+    host_control = INIT_OBJECT(host_control_storage, *host_uart, dm_motors);
+    if (!can_init())
+    {
+        osThreadExit();
+        return;
+    }
+    if (!host_uart->start())
+    {
+        dm_startup = Startup::SerialStartFailed;
+        osThreadExit();
+        return;
+    }
+    if (!tim_init())
     {
         osThreadExit();
         return;
@@ -258,9 +283,13 @@ static void motorCommandUpdate(void*)
     dm_startup = Startup::Ready;
     for (;;)
     {
-        for (auto* motor : dm_motors)
-            motor->commandUpdate();
-        osDelay(10); // Ozone command polling only; not a control/trajectory time source.
+        host_control->poll(HAL_GetTick()); // Serial and Ozone commands share one consumer.
+        host_link_timeout = host_control->timedOut();
+        host_crc_errors = host_control->crcErrors();
+        host_rx_dropped_bytes = host_uart->rxDrops();
+        host_uart_errors = host_uart->uartErrors();
+        host_tx_errors = host_uart->txErrors();
+        osDelay(1); // Protocol service only; motor timing remains hardware-driven.
     }
 }
 
