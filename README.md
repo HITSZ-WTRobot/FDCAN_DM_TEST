@@ -49,7 +49,7 @@ git clone --recurse-submodules https://github.com/HITSZ-WTRobot/FDCAN_DM_TEST.gi
 cd FDCAN_DM_TEST
 ```
 
-`.gitmodules` 的依赖 URL 使用 GitHub SSH，递归克隆前应配置有权访问依赖仓库的 SSH 凭据。也可先普通克隆，再让 cpkg 通过 HTTPS 同步：
+`.gitmodules` 的依赖 URL 使用 GitHub HTTPS。也可先普通克隆，再通过 cpkg 同步：
 
 ```sh
 git clone https://github.com/HITSZ-WTRobot/FDCAN_DM_TEST.git
@@ -57,7 +57,7 @@ cd FDCAN_DM_TEST
 cpkg sync --submodule-protocol https
 ```
 
-依赖由 [wtrproject.toml](wtrproject.toml) 声明，`Trajectory::MotorTrajectory` 传递提供当前使用的 `VelocityProfile::SCurve`。不手工编辑模块源码或生成的包 CMake 文件。同步会拉取配置的依赖分支，请留意子模块版本变更；已提交的子模块引用记录交付时的版本。
+依赖由 [wtrproject.toml](wtrproject.toml) 声明，`Trajectory::MotorTrajectory` 传递提供当前使用的 `VelocityProfile::SCurve`；`Chassis::Omni4` 提供四全向轮运动学并传递引入轮速控制器。不手工编辑模块源码或生成的包 CMake 文件。同步会拉取配置的依赖分支，请留意子模块版本变更；已提交的子模块引用记录交付时的版本。
 
 本仓库按现有 `.gitignore` 不提交 `Core/`、`Drivers/`、`Middlewares/`、启动汇编、CubeMX 生成的 CMake 子目录以及构建产物，**新克隆不能跳过代码生成**：
 
