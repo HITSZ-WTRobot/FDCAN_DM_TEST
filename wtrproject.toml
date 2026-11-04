@@ -6,7 +6,9 @@ ioc_file = "DMDebug.ioc"
 
 [dependencies]
 packages = [
+    "Chassis::ControllerMaster",
     "Chassis::Omni4",
+    "ChassisLocalization::JustEncoder",
     "MotorDrivers::DJI",
     "MotorDrivers::DM",
     "Trajectory::MotorTrajectory",
