@@ -9,12 +9,13 @@ namespace
 {
 constexpr float RadToDeg = 180.0f / 3.14159265358979323846f;
 constexpr unsigned StableSamples = 50;
+constexpr float JointHalfRangeDeg = 180.0f;
 bool positive(float value) { return std::isfinite(value) && value > 0.0f; }
 } // namespace
 
 DMPositionTest::DMPositionTest(const motors::DMMotor::Config& motor_config,
-                               const ControlParameters& control) :
-    motor_(motor_config), control_(control),
+                               const ControlParameters& control, PositionKind kind) :
+    motor_(motor_config), control_(control), kind_(kind),
     // Preserve the existing driver's S3519 contract, confirmed by the user's hardware.
     position_scale_(motor_config.reduction_rate *
                     (motor_config.type == motors::DMMotor::Type::S3519 ? 19.203f : 1.0f)),
@@ -38,25 +39,35 @@ bool DMPositionTest::validControl() const noexcept
 
 bool DMPositionTest::validReference(float position, float velocity) const noexcept
 {
-    const float wire_position = (zero_output_deg_ + position) * position_scale_;
+    return validAbsoluteReference(zero_output_deg_ + position, velocity);
+}
+
+bool DMPositionTest::validAbsoluteReference(float position, float velocity) const noexcept
+{
+    const float wire_position = position * position_scale_;
     const float wire_velocity = velocity * velocity_scale_;
     return std::isfinite(wire_position) && std::isfinite(wire_velocity) &&
            std::fabs(wire_position) <= protocol_max_position_deg_ &&
            std::fabs(wire_velocity) <= protocol_max_velocity_deg_s_;
 }
 
-bool DMPositionTest::validLimits(const MotionLimits& l) const noexcept
+bool DMPositionTest::validLimits(const MotionLimits& l, float zero) const noexcept
 {
-    return std::isfinite(l.min_deg) && std::isfinite(l.max_deg) && l.min_deg < l.max_deg &&
-           positive(l.max_velocity_deg_s) &&
-           l.max_velocity_deg_s * velocity_scale_ <= protocol_max_velocity_deg_s_ &&
-           positive(l.max_acceleration_deg_s2) && positive(l.max_jerk_deg_s3) &&
-           validReference(l.min_deg, 0.0f) && validReference(l.max_deg, 0.0f);
+    const bool valid_dynamics = positive(l.max_velocity_deg_s) &&
+        l.max_velocity_deg_s * velocity_scale_ <= protocol_max_velocity_deg_s_ &&
+        positive(l.max_acceleration_deg_s2) && positive(l.max_jerk_deg_s3);
+    if (kind_ == PositionKind::LinearActuator)
+        return valid_dynamics; // No software travel interval; encoding is checked on every reference.
+    return valid_dynamics && std::isfinite(l.min_deg) && std::isfinite(l.max_deg) &&
+           l.min_deg < l.max_deg && l.min_deg >= -JointHalfRangeDeg && l.max_deg <= JointHalfRangeDeg &&
+           validAbsoluteReference(zero + l.min_deg, 0.0f) &&
+           validAbsoluteReference(zero + l.max_deg, 0.0f);
 }
 
 bool DMPositionTest::inRange(float position) const noexcept
 {
-    return std::isfinite(position) && position >= limits_.min_deg && position <= limits_.max_deg;
+    return std::isfinite(position) && (kind_ == PositionKind::LinearActuator ||
+           (position >= limits_.min_deg && position <= limits_.max_deg));
 }
 
 float DMPositionTest::currentPosition() const noexcept
@@ -76,6 +87,8 @@ void DMPositionTest::holdPosition(float position) noexcept
     reference_deg = position;
     reference_velocity_deg_s = 0.0f;
     target_deg = position;
+    if (kind_ == PositionKind::LinearActuator)
+        target_mm = position * LinearMmPerDegree;
     accepted_target_deg = position;
     busy = false;
     motion_complete = false;
@@ -209,7 +222,7 @@ Result DMPositionTest::applyLimits()
         return Result::NotZeroed;
     const MotionLimits staged{min_deg, max_deg, max_velocity_deg_s,
                               max_acceleration_deg_s2, max_jerk_deg_s3};
-    if (!validLimits(staged))
+    if (!validLimits(staged, zero_output_deg_))
         return Result::InvalidParameters;
     limits_ = staged;
     limits_configured = true;
@@ -224,28 +237,26 @@ Result DMPositionTest::setZero()
         return Result::Busy;
     if (stable_samples_ < StableSamples)
         return Result::NotStationary;
-    const float shift = currentPosition();
-    if (limits_configured)
+    const float new_zero = motor_.getAngle();
+    MotionLimits candidate = limits_configured ? limits_ : MotionLimits{
+        min_deg, max_deg, max_velocity_deg_s, max_acceleration_deg_s2, max_jerk_deg_s3};
+    if (kind_ == PositionKind::Joint)
     {
-        const float new_min = limits_.min_deg - shift;
-        const float new_max = limits_.max_deg - shift;
-        if (!std::isfinite(new_min) || !std::isfinite(new_max) || new_min >= new_max)
-            return Result::InvalidParameters;
-        limits_.min_deg = new_min;
-        limits_.max_deg = new_max;
-        min_deg = new_min;
-        max_deg = new_max;
+        candidate.min_deg = -JointHalfRangeDeg;
+        candidate.max_deg = JointHalfRangeDeg;
     }
-    // Preserve the driver's absolute coordinate; MIT references must include this origin.
-    zero_output_deg_ = motor_.getAngle();
+    // Validate before changing the origin: failure leaves the old zero, target and limits intact.
+    if (!validAbsoluteReference(new_zero, 0.0f) || !validLimits(candidate, new_zero))
+        return Result::InvalidParameters;
+    zero_output_deg_ = new_zero;
+    limits_ = candidate;
+    limits_configured = true;
+    min_deg = candidate.min_deg;
+    max_deg = candidate.max_deg;
     holdPosition(0.0f);
     position_deg = 0.0f;
     zeroed = true;
     stable_samples_ = 0;
-    // The application stages defaults before starting CAN. Apply them only when
-    // no limits have been accepted; later rezero translates the accepted limits.
-    if (!limits_configured)
-        return applyLimits();
     return Result::Ok;
 }
 
@@ -325,11 +336,16 @@ void DMPositionTest::commandUpdate()
         if (requested == Command::None)
             return;
         command_active_ = true;
-        target = target_deg;
+        target = requested == Command::MoveMm ? target_mm / LinearMmPerDegree : target_deg;
     }
     Result outcome = Result::InvalidCommand;
-    if (requested == Command::Move)
-        outcome = move(target);
+    if (requested == Command::Move || requested == Command::MoveMm)
+    {
+        const bool matching_unit = (requested == Command::MoveMm) ==
+                                   (kind_ == PositionKind::LinearActuator);
+        if (matching_unit)
+            outcome = move(target);
+    }
     else
     {
         ISRGuard guard;
@@ -366,10 +382,12 @@ Result DMPositionTest::execute(Command requested, float target, const MotionLimi
 {
     {
         ISRGuard guard;
-        if (command_active_ || command != Command::None)
+        if (command_active_ || command != Command::None || (requested == Command::MoveMm && busy))
             return Result::Busy;
         if (requested == Command::Move)
             target_deg = target;
+        if (requested == Command::MoveMm)
+            target_mm = target;
         if (requested == Command::ApplyLimits && limits)
         {
             min_deg = limits->min_deg;
@@ -385,12 +403,43 @@ Result DMPositionTest::execute(Command requested, float target, const MotionLimi
     return result;
 }
 
+Result DMPositionTest::submit(Command requested, float mm)
+{
+    return execute(requested, mm);
+}
+
 void DMPositionTest::linkLost()
 {
     disableOutput(true);
     command = Command::None;
     result = Result::Offline;
     host_link_blocked_ = true;
+}
+
+Result DMPositionTest::moveToMm(float mm)
+{
+    if (kind_ != PositionKind::LinearActuator)
+        return Result::InvalidCommand;
+    if (!std::isfinite(mm) || !std::isfinite(mm / LinearMmPerDegree))
+        return Result::OutsideLimits;
+    return submit(Command::MoveMm, mm);
+}
+
+Result DMPositionTest::setSoftwareZero()
+{
+    return submit(Command::SetZero);
+}
+
+std::optional<LinearFeedback> DMPositionTest::linearFeedback() const
+{
+    if (kind_ != PositionKind::LinearActuator)
+        return std::nullopt;
+    ISRGuard guard;
+    return LinearFeedback{position_deg * LinearMmPerDegree,
+                          velocity_rpm * (LinearMmPerRevolution / 60.0f),
+                          accepted_target_deg * LinearMmPerDegree,
+                          reference_deg * LinearMmPerDegree,
+                          reference_velocity_deg_s * LinearMmPerDegree};
 }
 
 void DMPositionTest::profileUpdate()

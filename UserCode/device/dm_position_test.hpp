@@ -9,7 +9,8 @@ namespace device
 {
 enum class Command : std::uint32_t
 {
-    None = 0, SetZero = 1, Enable = 2, Disable = 3, Move = 4, Stop = 5, ApplyLimits = 6
+    None = 0, SetZero = 1, Enable = 2, Disable = 3, Move = 4, Stop = 5, ApplyLimits = 6,
+    MoveMm = 7
 };
 
 enum class Result : std::uint32_t
@@ -17,6 +18,17 @@ enum class Result : std::uint32_t
     Ok = 0, Offline = 1, NotZeroed = 2, NotEnabled = 3, Busy = 4,
     InvalidParameters = 5, OutsideLimits = 6, NotStationary = 7,
     MotorFault = 8, PlanningFailed = 9, InvalidCommand = 10, TransmitFailed = 11
+};
+
+enum class PositionKind { Joint, LinearActuator };
+
+struct LinearFeedback
+{
+    float position_mm;
+    float velocity_mm_s;
+    float accepted_target_mm;
+    float reference_mm;
+    float reference_velocity_mm_s;
 };
 
 // MIT packet coefficients, not MCU PID gains. Copied at construction.
@@ -32,7 +44,7 @@ struct ControlParameters
 
 struct MotionLimits
 {
-    float min_deg{};
+    float min_deg{}; // Joint software interval only; ignored for linear travel.
     float max_deg{};
     float max_velocity_deg_s{};
     float max_acceleration_deg_s2{};
@@ -57,11 +69,10 @@ struct MotionLimits
  * CAN RX share one non-preempting priority. Task state handoffs use short ISRGuards;
  * curve solving does not mask interrupts, and the previous reference remains valid.
  *
- * Application-provided limits are staged before CAN starts and automatically
- * validated/applied after the first software zero. Invalid defaults leave
- * limits_configured false and inhibit enable, without clamping or changing PMAX.
- * ApplyLimits still permits an explicit disabled-state override. Subsequent rezero
- * translates accepted limits instead of restoring the initial defaults.
+ * Joint travel is limited to +/-180 degrees about each new software zero. Linear
+ * actuators have no software travel interval; finite values and absolute protocol
+ * encoding bounds still apply. A new joint zero is rejected if its full interval
+ * cannot be encoded. Both kinds retain validated trajectory velocity/accel/jerk.
  *
  * Enable first preloads a hold reference while disabled, then requests enable; only
  * fresh feedback confirms state. Faults cancel motion and request disable with no
@@ -74,7 +85,7 @@ class DMPositionTest final
 {
 public:
     DMPositionTest(const motors::DMMotor::Config& motor_config,
-                   const ControlParameters& control);
+                   const ControlParameters& control, PositionKind kind);
     DMPositionTest(const DMPositionTest&) = delete;
     DMPositionTest& operator=(const DMPositionTest&) = delete;
 
@@ -91,10 +102,18 @@ public:
     void linkRestored() noexcept { host_link_blocked_ = false; } // No automatic enable.
     ControlParameters controlParameters() const noexcept { return control_; }
     MotionLimits activeLimits() const noexcept { return limits_; }
+    // Task-side APIs; use the same single command consumer, never call from an ISR.
+    // Commands only change state; all CAN output remains in the existing TIM6 slots.
+    static constexpr float LinearMmPerRevolution = 226.2f; // User-supplied nominal output-shaft travel.
+    static constexpr float LinearMmPerDegree = LinearMmPerRevolution / 360.0f;
+    Result moveToMm(float target_mm); // Absolute position relative to current software zero; linear only.
+    Result setSoftwareZero(); // Disabled + stable feedback; joint interval recenters on success.
+    std::optional<LinearFeedback> linearFeedback() const; // nullopt for joints; no heap allocation.
 
     volatile Command command{Command::None};
     volatile Result result{Result::Ok};
-    volatile float target_deg{0.0f};
+    volatile float target_deg{0.0f}; // Joint Move input; also retains internal angle-reference bookkeeping.
+    volatile float target_mm{0.0f}; // Linear MoveMm input; raw Move/target_deg is joint-only.
     volatile float min_deg{0.0f};
     volatile float max_deg{0.0f};
     volatile float max_velocity_deg_s{0.0f};
@@ -122,9 +141,10 @@ public:
 private:
     enum class EnablePhase { None, Preload, WaitPreload, SendEnable, WaitEnable };
     [[nodiscard]] bool validControl() const noexcept;
-    [[nodiscard]] bool validLimits(const MotionLimits& limits) const noexcept;
+    [[nodiscard]] bool validLimits(const MotionLimits& limits, float zero) const noexcept;
     [[nodiscard]] bool inRange(float position) const noexcept;
     [[nodiscard]] bool validReference(float position, float velocity) const noexcept;
+    [[nodiscard]] bool validAbsoluteReference(float position, float velocity) const noexcept;
     [[nodiscard]] float currentPosition() const noexcept;
     void disableOutput(bool latch_fault);
     void holdPosition(float position) noexcept;
@@ -133,9 +153,11 @@ private:
     [[nodiscard]] Result setZero();
     [[nodiscard]] Result enableOutput();
     [[nodiscard]] Result move(float target);
+    Result submit(Command requested, float target_mm = 0.0f);
 
     motors::DMMotor motor_;
     ControlParameters control_;
+    const PositionKind kind_;
     MotionLimits limits_{};
     std::optional<velocity_profile::SCurveProfile> profile_{};
     float position_scale_;
