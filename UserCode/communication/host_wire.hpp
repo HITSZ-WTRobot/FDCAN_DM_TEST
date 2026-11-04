@@ -9,11 +9,15 @@ namespace host
 inline constexpr std::size_t FrameSize = 64;
 inline constexpr std::size_t PayloadSize = 50;
 inline constexpr std::uint8_t AllMotors = 0xff;
+inline constexpr std::uint8_t WireVersion = 2;
+inline constexpr std::uint8_t ChassisDevice = 0x40;
+inline constexpr std::array<std::uint8_t,9> DeviceIds{0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,0x21,0x22,ChassisDevice};
 using Frame = std::array<std::uint8_t, FrameSize>;
 enum class Opcode : std::uint8_t
 {
-    Heartbeat=0x01, Info=0x02, State=0x10, Parameters=0x11,
-    Enable=0x20, Disable=0x21, Stop=0x22, SetZero=0x23, Move=0x24, SetLimits=0x25
+    Heartbeat=0x01, Info=0x02, State=0x10, Parameters=0x11, Wheels=0x12,
+    Enable=0x20, Disable=0x21, Stop=0x22, SetZero=0x23, Move=0x24, SetLimits=0x25,
+    BodyVelocity=0x26
 };
 enum class WireResult : std::uint16_t
 {
@@ -21,8 +25,9 @@ enum class WireResult : std::uint16_t
     UnknownOpcode=104, UnknownMotor=105, SequenceConflict=106, LinkFault=107
 };
 // All multi-byte fields little-endian. CRC16/CCITT-FALSE covers bytes 0..61.
-// 0:A5 1:5A 2:version=1 3:type=0 request/1 response 4..5:sequence
-// 6:opcode 7:motor CAN ID or FF 8..9:payload length 10..11:reserved=0
+// 0:A5 1:5A 2:version=2 3:type=0 request/1 response 4..5:sequence
+// 6:opcode 7:logical device ID or FF (not necessarily a CAN ID)
+// 8..9:payload length 10..11:reserved=0
 // 12..61:payload and zero padding 62..63:CRC little-endian.
 std::uint16_t get16(const std::uint8_t* p) noexcept;
 std::uint32_t get32(const std::uint8_t* p) noexcept;

@@ -153,7 +153,6 @@ private:
     [[nodiscard]] Result setZero();
     [[nodiscard]] Result enableOutput();
     [[nodiscard]] Result move(float target);
-    Result submit(Command requested, float target_mm = 0.0f);
 
     motors::DMMotor motor_;
     ControlParameters control_;

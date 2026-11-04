@@ -299,7 +299,7 @@ static void motorCommandUpdate(void*)
     m2006_can = INIT_OBJECT(m2006_can_storage, hfdcan3);
     m2006_group = INIT_OBJECT(m2006_group_storage, *m2006_can, m2006_control);
     host_uart = INIT_OBJECT(host_uart_storage, huart1, host_rx_dma, host_tx_dma);
-    host_control = INIT_OBJECT(host_control_storage, *host_uart, dm_motors);
+    host_control = INIT_OBJECT(host_control_storage, *host_uart, dm_motors, *dm_chassis, *m2006_group);
     chassis_startup = dm_chassis->start();
     if (chassis_startup != device::DMOmniChassis::Startup::Ready)
     {

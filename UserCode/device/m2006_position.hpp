@@ -70,6 +70,9 @@ public:
     void positionUpdate();            // 500 Hz: fresh-sample observation + real errorUpdate.
     void velocityUpdate();            // 1 kHz: real controllerUpdate; cached output only.
     void transmitFailed();            // Latches fault; no immediate CAN submission.
+    void linkLost(); // ISR-safe latch; zero cache, no immediate CAN output.
+    void linkRestored() noexcept { host_blocked_=false; }
+    Config controlParameters() const noexcept { return config_; }
     [[nodiscard]] Feedback feedback() const;
 
 private:
@@ -94,6 +97,7 @@ private:
     Feedback state_{};
     volatile bool command_active_{false};
     bool reset_pending_{false};
+    bool host_blocked_{false};
     bool auto_zero_pending_{false};
     bool ever_connected_{false};
     bool ever_zeroed_{false};

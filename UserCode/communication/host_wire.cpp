@@ -20,7 +20,7 @@ void finish(Frame& f,std::uint16_t length) noexcept
 }
 Frame response(const Frame& r,std::uint8_t motor,std::uint16_t result) noexcept
 {
-    Frame f{};f[0]=0xa5;f[1]=0x5a;f[2]=1;f[3]=1;
+    Frame f{};f[0]=0xa5;f[1]=0x5a;f[2]=WireVersion;f[3]=1;
     f[4]=r[4];f[5]=r[5];f[6]=r[6];f[7]=motor;
     put16(f.data()+12,result);finish(f,2);return f;
 }

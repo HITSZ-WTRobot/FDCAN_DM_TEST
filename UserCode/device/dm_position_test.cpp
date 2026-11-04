@@ -403,11 +403,6 @@ Result DMPositionTest::execute(Command requested, float target, const MotionLimi
     return result;
 }
 
-Result DMPositionTest::submit(Command requested, float mm)
-{
-    return execute(requested, mm);
-}
-
 void DMPositionTest::linkLost()
 {
     disableOutput(true);
@@ -422,12 +417,12 @@ Result DMPositionTest::moveToMm(float mm)
         return Result::InvalidCommand;
     if (!std::isfinite(mm) || !std::isfinite(mm / LinearMmPerDegree))
         return Result::OutsideLimits;
-    return submit(Command::MoveMm, mm);
+    return execute(Command::MoveMm, mm);
 }
 
 Result DMPositionTest::setSoftwareZero()
 {
-    return submit(Command::SetZero);
+    return execute(Command::SetZero);
 }
 
 std::optional<LinearFeedback> DMPositionTest::linearFeedback() const

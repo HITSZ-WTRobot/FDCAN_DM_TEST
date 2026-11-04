@@ -156,6 +156,8 @@ M2006Position::Result M2006Position::enable()
 {
     {
         ISRGuard guard;
+        if (host_blocked_)
+            return Result::NotEnabled;
         if (command_active_)
             return recordResult(Result::Busy);
         observeConnection();
@@ -233,6 +235,8 @@ M2006Position::Result M2006Position::moveToDegrees(float target_deg)
 {
     {
         ISRGuard guard;
+        if (host_blocked_)
+            return Result::NotEnabled;
         if (command_active_)
             return recordResult(Result::Busy);
         observeConnection();
@@ -420,6 +424,13 @@ void M2006Position::transmitFailed()
 {
     ISRGuard guard;
     latchFault(Result::TransmitFailed);
+}
+
+void M2006Position::linkLost()
+{
+    ISRGuard guard;
+    host_blocked_=true;
+    latchFault(Result::Offline);
 }
 
 M2006Position::Feedback M2006Position::feedback() const
