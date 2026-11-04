@@ -1,4 +1,5 @@
 #include "cmsis_os2.h"
+#include "device/dm_omni_chassis.hpp"
 #include "device/dm_position_test.hpp"
 #include "fdcan.h"
 #include "static_object.hpp"
@@ -19,6 +20,15 @@ device::ControlParameters dm_control[6]{
 
 bsp::can::Can* dm_can = nullptr;
 device::DMPositionTest* dm_motors[6]{}; // 索引及部位见下方表；每台Master ID=0x20+CAN ID。
+
+// FDCAN2 is independent of the six position-test motors on FDCAN1.
+// User confirmed: 127mm wheels, 435mm square, direct drive, initial positive directions.
+device::DMOmniChassis::Config chassis_config{}; // reverse[FR, FL, RL, RR], copied at construction.
+bsp::can::Can* chassis_can = nullptr;
+device::DMOmniChassis* dm_chassis = nullptr;
+device::DMOmniChassis::Feedback chassis_feedback{};
+volatile device::DMOmniChassis::Startup chassis_startup{device::DMOmniChassis::Startup::NotStarted};
+volatile bool chassis_poll_ok{false}; // Hardware submission only, not physical disable confirmation.
 
 struct MotorParameters
 {
@@ -105,6 +115,8 @@ volatile std::uint32_t dm_tx_failures{0};
 // permanent and never allocate from the project's small C/C++ heap or an ISR.
 static memory::StaticObject<bsp::can::Can> can_storage;
 static memory::StaticObject<device::DMPositionTest> motor_storage[6];
+static memory::StaticObject<bsp::can::Can> chassis_can_storage;
+static memory::StaticObject<device::DMOmniChassis> chassis_storage;
 
 static void motor_init()
 {
@@ -198,6 +210,7 @@ static void motorFeedbackUpdate(TIM_HandleTypeDef*) // TIM3, 500 Hz.
     service::Watchdog::EatAll();
     for (auto* motor : dm_motors)
         motor->feedbackUpdate();
+    chassis_poll_ok = dm_chassis->pollDisabled(); // FDCAN2 only, 4 disable packets / 2ms.
 }
 
 static void motorMitSendUpdate(TIM_HandleTypeDef*) // TIM6, 2 kHz; each motor 1 kHz.
@@ -248,8 +261,16 @@ static bool tim_init()
 static void motorCommandUpdate(void*)
 {
     // Initialization runs on this 4096-byte task stack, not the 512-byte Init stack.
-    // Register all six motor callbacks before starting the shared bus or timers.
+    // Construct/register all ten motors before starting either bus or the timers.
     motor_init();
+    chassis_can = INIT_OBJECT(chassis_can_storage, hfdcan2);
+    dm_chassis = INIT_OBJECT(chassis_storage, *chassis_can, chassis_config);
+    chassis_startup = dm_chassis->start();
+    if (chassis_startup != device::DMOmniChassis::Startup::Ready)
+    {
+        osThreadExit();
+        return;
+    }
     if (!can_init() || !tim_init())
     {
         osThreadExit();
@@ -260,7 +281,8 @@ static void motorCommandUpdate(void*)
     {
         for (auto* motor : dm_motors)
             motor->commandUpdate();
-        osDelay(10); // Ozone command polling only; not a control/trajectory time source.
+        chassis_feedback = dm_chassis->feedback(); // Observation only; no chassis motion command source.
+        osDelay(10); // Original six-motor commands + chassis observation; not a control time source.
     }
 }
 
