@@ -1,6 +1,7 @@
 #include "cmsis_os2.h"
 #include "device/dm_omni_chassis.hpp"
 #include "device/dm_position_test.hpp"
+#include "device/m2006_group.hpp"
 #include "fdcan.h"
 #include "static_object.hpp"
 #include "tim.h"
@@ -29,6 +30,17 @@ device::DMOmniChassis* dm_chassis = nullptr;
 device::DMOmniChassis::Feedback chassis_feedback{};
 volatile device::DMOmniChassis::Startup chassis_startup{device::DMOmniChassis::Startup::NotStarted};
 volatile bool chassis_poll_ok{false}; // Hardware submission only, not physical disable confirmation.
+
+// User image: discrete gains are used verbatim at the specified 1k/500/100Hz rates.
+// C610 protocol current units: 8000 means 8A torque-current command, not input current.
+device::M2006Position::Config m2006_control[2]{
+    {.velocity_pid = {9.0f, 0.1f, 0.0f, 8000.0f},
+     .position_pd = {5.0f, 4000.0f, 400.0f}, .profile = {1800.0f, 1200.0f, 3000.0f}},
+    {.velocity_pid = {9.0f, 0.1f, 0.0f, 8000.0f},
+     .position_pd = {5.0f, 4000.0f, 400.0f}, .profile = {1800.0f, 1200.0f, 3000.0f}}
+};
+bsp::can::Can* m2006_can = nullptr;
+device::M2006Group* m2006_group = nullptr;
 
 struct MotorParameters
 {
@@ -115,6 +127,8 @@ static memory::StaticObject<bsp::can::Can> can_storage;
 static memory::StaticObject<device::DMPositionTest> motor_storage[6];
 static memory::StaticObject<bsp::can::Can> chassis_can_storage;
 static memory::StaticObject<device::DMOmniChassis> chassis_storage;
+static memory::StaticObject<bsp::can::Can> m2006_can_storage;
+static memory::StaticObject<device::M2006Group> m2006_group_storage;
 
 static void motor_init()
 {
@@ -167,6 +181,7 @@ static void can_receive(const bsp::can::FrameView& frame)
     }
 }
 
+
 static bool can_init()
 {
     // Upstream DM driver owns its standard mask filter (0x028/0x7F8), covering
@@ -203,6 +218,7 @@ static void motorProfileUpdate(TIM_HandleTypeDef*) // TIM7, 100 Hz.
 {
     for (auto* motor : dm_motors)
         motor->profileUpdate();
+    m2006_group->profileUpdate(); // TIM7 100Hz: trajectory velocity feedforward.
 }
 
 static void motorFeedbackUpdate(TIM_HandleTypeDef*) // TIM3, 500 Hz.
@@ -212,6 +228,7 @@ static void motorFeedbackUpdate(TIM_HandleTypeDef*) // TIM3, 500 Hz.
     for (auto* motor : dm_motors)
         motor->feedbackUpdate();
     chassis_poll_ok = dm_chassis->pollDisabled(); // FDCAN2 only, 4 disable packets / 2ms.
+    m2006_group->positionUpdate(); // TIM3 500Hz: position error compensation.
 }
 
 static void motorMitSendUpdate(TIM_HandleTypeDef*) // TIM6, 2 kHz; each motor 1 kHz.
@@ -235,6 +252,7 @@ static void motorMitSendUpdate(TIM_HandleTypeDef*) // TIM6, 2 kHz; each motor 1 
     const auto traffic = dm_can->counters();
     dm_rx_frames = traffic.rx_frames;
     dm_tx_submitted_frames = traffic.tx_submitted_frames;
+    m2006_group->transmitTick(); // Device owns /2 cadence, 1kHz speed PID and grouped current output.
     
 }
 
@@ -262,17 +280,19 @@ static bool tim_init()
 static void motorCommandUpdate(void*)
 {
     // Initialization runs on this 4096-byte task stack, not the 512-byte Init stack.
-    // Construct/register all ten motors before starting either bus or the timers.
+    // Construct/register all twelve motors before starting the three buses or timers.
     motor_init();
     chassis_can = INIT_OBJECT(chassis_can_storage, hfdcan2);
     dm_chassis = INIT_OBJECT(chassis_storage, *chassis_can, chassis_config);
+    m2006_can = INIT_OBJECT(m2006_can_storage, hfdcan3);
+    m2006_group = INIT_OBJECT(m2006_group_storage, *m2006_can, m2006_control);
     chassis_startup = dm_chassis->start();
     if (chassis_startup != device::DMOmniChassis::Startup::Ready)
     {
         osThreadExit();
         return;
     }
-    if (!can_init() || !tim_init())
+    if (!can_init() || m2006_group->start() != device::M2006Group::Startup::Ready || !tim_init())
     {
         osThreadExit();
         return;
@@ -283,7 +303,8 @@ static void motorCommandUpdate(void*)
         for (auto* motor : dm_motors)
             motor->commandUpdate();
         chassis_feedback = dm_chassis->feedback(); // Observation only; no chassis motion command source.
-        osDelay(10); // Original six-motor commands + chassis observation; not a control time source.
+        m2006_group->service(); // Device handles first-boot zero; never auto-enables.
+        osDelay(10); // Device commands/observation and initial-zero service; not a control time source.
     }
 }
 

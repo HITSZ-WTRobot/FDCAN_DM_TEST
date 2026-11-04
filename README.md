@@ -1,6 +1,6 @@
 # FDCAN_DM_TEST
 
-STM32H723VET6 双 FDCAN 工程：FDCAN1 保留六个达妙电机的位置测试，使用已有 SCurve 生成位置、速度参考并发送 MIT 五元组，不在 MCU 中建立外部位置 PD 或速度 PID；FDCAN2 新增四个 DM-S3519 的全向轮底盘结构，目前仅失能轮询和反馈观察，不接入底盘运动命令。
+STM32H723VET6 三 FDCAN 工程：FDCAN1 保留六个达妙电机的 MIT 轨迹位置控制，FDCAN2 为四个 DM-S3519 全向轮底盘结构（仅失能轮询/反馈），FDCAN3 为两台独立 M2006/C610 的外部速度 PID、位置 PD 与 S 曲线速度前馈。新增 M2006 不接入串口或 Ozone 控制；原六台 DM 的调试入口不扩展为 DJI 控制入口。
 
 > 用户此前确认可烧录运行的是原六电机版本，不是本轮新增底盘或上轮串口实现。本分支从 origin/main 单独开发，未带入上轮未达到可用程度的串口测试。底盘本轮通过 Debug 构建和主机边界烟测，尚无实板运动验证；不宣称带载稳定或机械安全。
 
@@ -24,16 +24,16 @@ S3519 位置口径保留用户此前实测及上游驱动的处理：反馈位�
 ## 硬件和定时分工
 
 - STM32H723VET6；FDCAN1 的 RX 为 PB8，TX 为 PB9；通过板载收发器接 CAN_H/CAN_L。
-- FDCAN 内核时钟 100 MHz；仲裁段 1 Mbps，数据段 5 Mbps，FD+BRS。电机端需匹配实际时序，不仅是界面中的“5M”标签。
+- FDCAN 内核时钟 100 MHz；前两路仲裁段 1 Mbps、数据段 5 Mbps、FD+BRS；第三路 Classic CAN 1 Mbps、不启用 BRS。电机端需匹配实际时序，不仅是界面中的速率标签。
 - 上游 `DMMotor::CAN_FilterInit(can, index)` 使用标准 Mask 过滤器：`id1=0x028`、`id2=0x7F8`，覆盖合法反馈 ID。每实例及应用再次同时检查反馈 ID 与载荷电机 ID。
-- 两条总线各由一个 Can 对象管理；全部十台电机完成构造、接收回调注册后才启动总线，底盘不复用 FDCAN1 实例。
+- 三条总线各由一个 Can 对象管理；全部十二台电机完成构造、接收回调注册后才启动总线，各设备组不共享或重复管理同一 HAL 句柄。
 
 | 执行位置 | 频率 | 用途 |
 |---|---:|---|
-| 命令任务 | 约 10 ms 轮询 | 原六电机 Ozone 命令/曲线求解，以及四轮底盘反馈快照；不提供底盘命令 |
-| TIM7 | 100 Hz | 推进轨迹位置和速度参考 |
-| TIM3 | 500 Hz | 原六电机反馈/故障处理、FDCAN2 四轮失能轮询；唯一软件 Watchdog 推进者 |
-| TIM6 | 2 kHz | 每次交替发送三台；每台名义更新 1 kHz |
+| 命令任务 | 约 10 ms 轮询 | 原 DM 命令/曲线求解、底盘反馈观察、M2006 首次稳定归零服务；不自动使能 |
+| TIM7 | 100 Hz | DM 轨迹采样，以及 M2006 S 曲线位置参考/速度前馈采样（dt=0.01 s） |
+| TIM3 | 500 Hz | DM 反馈/故障、底盘失能轮询、M2006 位置 PD 和状态；唯一全局 Watchdog 推进者 |
+| TIM6 | 2 kHz | 原 DM 两组三台交替发送；M2006Group 内部每2次调用执行一次速度PID并聚合发送，即1 kHz |
 | TIM23 | HAL 系统时基 | 保留生成配置，不用于电机控制 |
 
 发送组 A 为 `[0,1,2]`（`0x0A/0x0B/0x0C`），组 B 为 `[3,4,5]`（`0x0D/0x0E/0x0F`）。组间软件提交间隔 0.5 ms，同一台周期 1 ms。MIT、使能、失能均走该唯一发送入口；发送失败不在当前时隙立即重试。CAN 仲裁、排队和错误重发仍可能改变实际线上时刻；分组不等于降低平均负载。
@@ -157,6 +157,70 @@ device::Result zero_result = dm_motors[0]->setSoftwareZero();
 Debug 固件构建通过。临时 ASan/UBSan 原生烟测使用真实 DMOmniChassis、DM、MotorVelController、PID 依赖和 Omni4，CAN/HAL 采用边界模型：验证启动失败与重复启动、独立总线、500 次轮询共 2000 帧且全部为失能包、发送失败不重试、提交计数回绕、旧 Master ID/交叉 ID 拒收、Watchdog 断联、前进/横移/旋转/复合速度的 127/435 mm 分解与反解、方向配置。运动分解由临时测试刺激器通过库 Controller 控制权接口触发，不是固件新增的操作入口。临时测试遵守对象永久登记生命周期，未改上游代码；完成后移除临时文件。未烧录、驱动实物或测试真实总线仲裁/电气波形、实际反馈频率、轮向和带载稳定性。
 
 
+## 双 M2006/C610（FDCAN3）
+
+### 分层与固定参数
+
+使用未修改的 `DJIMotor`、`MotorVelController(ExternalPID)` 和两个独立的 `MotorTrajectory<1>`。`device/m2006_position.*` 管单台设备的轨迹、PID/PD、零点和故障；`device/m2006_group.*` 管两台组装、独立 CAN 启动/回调、更新节拍分发和聚合发送。`app.cpp` 只提供参数/固定存储、对象组装及薄调用，不放新设备的反馈解码、协议分发、循环分频、控制或发包实现。
+
+以下来自用户提供的参数图片，构造时复制；改 `m2006_control` 数组不在线生效。PID/PD 库使用离散增益，不额外乘除 dt，不照搬参考 M3508 工程的增益或外接减速比：
+
+| 项目 | 参数 | 执行节拍/单位 |
+|---|---|---|
+| 外部速度 PID | Kp=9、Ki=0.1、Kd=0、abs_output_max=8000 | 1 kHz；输入输出轴 rpm，输出 C610 电流协议单位 |
+| 位置误差 PD | Kp=5、Kd=4000、abs_output_max=400 | 500 Hz；输入 deg，输出 deg/s，再由库转换成 rpm |
+| S 曲线 | max_spd=1800、max_acc=1200、max_jerk=3000 | deg/s、deg/s²、deg/s³；100 Hz 采样位置和速度前馈 |
+
+前馈是**规划速度前馈**，不是猜测的电流/力矩/重力补偿：100 Hz 库 `profileUpdate(0.01f)` 生成位置/速度参考，500 Hz `errorUpdate()` 叠加位置 PD，1 kHz `controllerUpdate()` 执行速度 PID。命令只求解新曲线，不在100Hz中断反复求解整条曲线。C610 手册规定协议−10000～+10000对应转矩电流−10～+10 A；8000为8 A指令，不是电源输入电流，也不是已证明的带载安全值。当前位置保持仍可能有电流。
+
+完成阈值0.5°、静止阈值0.1 rpm沿用获准参考设备 `Flip` 的默认值，并未实板整定。C610 默认1kHz反馈；1kHz控制周期不证明实际收到了1kHz新反馈。连续角度展开要求相邻反馈转子真实角差<180°，丢帧造成的整圈不可恢复。
+
+### 编号、角度和上电行为
+
+两台均为 M2006 P36+C610，ID分别1、2，反馈标准ID为0x201/0x202，默认正向，无外接减速，库负责内置36:1。电机侧编号由操作者设置，固件不改C610配置。两台目标独立，不使用双电机平均到位。
+
+- 目标为减速后输出轴相对当前软件零点的绝对 **0°～360°**，包含端点；不是转子单圈角度，不取最短路径、不将360°模为0°。非有限值返回 InvalidParameters；越界目标返回 OutsideLimits，不静默限幅。
+- 上电保持零电流/控制器未使能，收到50次新的失能、静止且位置稳定反馈后，由设备任务服务自动建立首次软件零点。500Hz观察同一缓存不会累计稳定次数；位置稳定阈值为两倍输出轴编码器LSB（约0.00244°）。不依赖固定延时、不自动使能。
+- `setSoftwareZero()` 只在未使能、有新鲜连接且稳定时接受；每次把当前位置重新定义为0°并建立新的0～360°范围，改变允许到达的实际区域。它不移动电机、不写Flash、不保存掉电零点，也不自动使能/恢复旧目标。必须先确认机构有足够安全空间。
+- 每次启用/归零/故障清理重建真实轨迹对象并重置速度PID，清除私有位置PD历史；不是自写第二套PD。新曲线求解和重建不长时间屏蔽中断，命令门禁与短临界区交接状态。
+- 到位要同时满足本次曲线结束、该台新的反馈位置误差≤0.5°、速度≤0.1rpm，且connected/enabled正常、无fault。Busy=false也可能是取消或故障，不能单独判到位。反馈中的enabled是软件控制器状态，不是C610物理使能应答。
+
+### 软件入口（没有串口/Ozone命令邮箱）
+
+单个已有命令任务调用设备接口，后续串口层应转交到该任务，不能在UART/CAN ISR求解曲线，也不能多个任务同时操作同一设备。应用本轮只启动自动归零服务，没有自动调用下面的使能或运动示例：
+
+```cpp
+auto& a = m2006_group->first();  // C610 ID1
+auto& b = m2006_group->second(); // C610 ID2，目标独立
+// 必须先取得新反馈，确认connected、zeroed、无fault及机械条件。
+device::M2006Position::Result enabled = a.enable();
+device::M2006Position::Result accepted = a.moveToDegrees(90.0f);
+auto states = m2006_group->feedback(); // 两台一致观察快照
+```
+
+这是调用格式，不是可以忽略错误的连续操作流程：检查 enable() 的返回值成功后才发Move，并检查本次结果。`first()/second()` 返回各自设备对象，不泄露裸电机/PID控制权。各台还有 `stop()`（取消轨迹、当前位置保持，仍有力矩）、`disable()`（释放控制、缓存零电流）、`setSoftwareZero()`（失能静止后重设零点）。moveToDegrees在busy时返回Busy，保留原曲线/目标；库规划失败也保留原轨迹/目标，不报告成功。所有命令只更新状态/电流缓存，不直接发CAN。
+
+Result数值：Ok=0、Offline=1、NotZeroed=2、NotEnabled=3、Busy=4、OutsideLimits=5、NotStationary=6、PlanningFailed=7、Fault=8、InvalidParameters=9、TransmitFailed=10。它独立于DM的Result枚举，不可混用。查询state.result是最近结果/故障原因，不替代本次函数返回值。
+
+Feedback包含result、connected、zeroed、enabled、busy、motion_complete、fault、position_deg、velocity_rpm、target_deg、velocity_reference_rpm、feedback_count。velocity_reference_rpm是最近实际速度PID使用的“前馈+位置修正”总参考，不是假造的纯前馈遥测。断线时测量可为旧值。`startup()`返回NotStarted=0、Ready=1、FilterFailed=2、ReceiveCallbackFailed=3、CanStartFailed=4；启动失败不自动恢复。`transmitFailures()`只统计硬件提交失败，不证明实际线上发送。
+
+### CAN3 与定时交接
+
+FDCAN3 RX=PD12、TX=PD13，第三路独立收发器和FDCAN3H/L/GND。100MHz内核，Classic/Normal、自动重传Enable；当前用户生成Nominal Prescaler=5、Seg1=14、Seg2=5、SJW=4，速率1Mbps、采样点75%；Data字段在Classic模式无效，不开BRS或TDC。StdFilters=1、ExtFilters=0；库掩码0x200/0x7F0，实例严格接受自己的Classic标准数据帧DLC8。
+
+MessageRAMOffset=1024（32位字），RX FIFO0=16×64bytes，TX FIFO=16×8bytes，其他分配数量0；占字区间[1024,1377)，不与前两路重叠。**当前CAN库即便Classic模式也要求已分配RX元素至少64bytes**，因此不能将RX元素改成8bytes，亦不要把元素数量16改成64。FDCAN3 IT0/IT1均5/0，HAL回调注册已启用。用户在CubeMX配置生成，代码仅启动/注册，不修改生成层；本轮不擅自提交用户.ioc。
+
+TIM7=100Hz、TIM3=500Hz原节拍不改；TIM6仍2kHz驱动原DM分组，调用 `M2006Group::transmitTick()`，设备组内部每两次执行一次两台速度PID并用 `DJIMotor::SendIqCommand(group1_4)` 发送一帧0x200。未注册的槽3/4固定零，不发送无用的0x1FF组。停止、失能、故障也不从别处插入聚合发送；失败只锁存并清零缓存，下一正常1ms时隙发零，不立即重试。全局Watchdog依然只在TIM3推进一次，名义反馈失联窗口约20ms，不能又在1kHz路径重复推进。
+
+反馈失联会取消控制/轨迹、零电流、锁存fault并使软件零点失效；恢复反馈不会自动归零或续跑，需操作者确认静止后显式setSoftwareZero，再明确enable及新目标。发送失败也锁存故障；成功的失能稳定软件设零可清锁存。零电流是电流请求，不代表机械已停、硬件切电或重力负载安全；真正输出仍依赖总线和电调，MCU停机/断电/总线故障不保证能送出零帧。执行器当前反馈超出范围会停用，实际反馈允许约两编码器LSB的量化容差，目标本身仍严格0～360；没有硬限位保护。
+
+### 验证证据与边界
+
+Debug 固件构建通过。临时 ASan/UBSan 烟测直接包含当前 app.cpp 并运行实际设备组、DM、Omni4、DJI、MotorTrajectory、PID/PD 和 SCurve，仅HAL/CAN/电机机构用主机边界模型。初始健康1秒实际调用100次轨迹入口、500次位置入口和2000次TIM6入口，新增总线提交1000帧Classic 0x200，原DM总线6000帧、底盘总线2000帧；上电全部DJI输出槽为零。后续独立90°/240°目标、360°与0°端点到位、软件重归零、停止保持与取消不误报到位、失联后保持故障且不自动恢复、显式归零恢复、越界/NaN/Busy拒绝、发送失败无即时重试及后续零电流均已在模型中观察。
+
+模型中使用电流驱动的一阶轮速响应，参数不是M2006实物辨识结果；最初7.5秒观察窗口尚未到位（两个目标仍在收敛），延长观察后才满足0.5°/0.1rpm判据，未为通过测试修改用户PID或放宽到位阈值。模拟到位不能证明实物响应时间、带载稳定、真实电流或机械安全。未烧录、复位目标或运行真实机构；默认正向、C610编号、反馈频率和实际接线仍须操作者确认。临时烟测完成后移除，不新增平行工程构建体系。
+
+
 ## Ozone 测试步骤
 
 ### 1. 运行与观察
@@ -249,6 +313,8 @@ command=0，result=0
 - [UserCode/app.cpp](UserCode/app.cpp)：参数、设备部位映射、初始化、任务及薄定时调度。
 - [UserCode/device/dm_position_test.hpp](UserCode/device/dm_position_test.hpp)、[实现](UserCode/device/dm_position_test.cpp)：命令、软件零点、运动限值、轨迹与 MIT 输出。
 - [UserCode/device/dm_omni_chassis.hpp](UserCode/device/dm_omni_chassis.hpp)、[实现](UserCode/device/dm_omni_chassis.cpp)：FDCAN2 四轮电机、内部轮速控制器与 Omni4 组合，以及失能通信/反馈。
+- [UserCode/device/m2006_group.hpp](UserCode/device/m2006_group.hpp)、[实现](UserCode/device/m2006_group.cpp)：FDCAN3 双电机组、反馈注册、分频与唯一聚合发送。
+- [UserCode/device/m2006_position.hpp](UserCode/device/m2006_position.hpp)、[实现](UserCode/device/m2006_position.cpp)：单台 M2006 的外部轨迹前馈、位置PD/速度PID、零点/启停/故障和反馈快照。
 - [DMDebug.ioc](DMDebug.ioc)：CubeMX 配置唯一来源。
 - `Modules/`：cpkg 管理的 Git 子模块；本工程只调用上游接口，不维护私改驱动副本。
 - `cmake/`：已跟踪工具链和构建接入；生成内容按忽略规则保留在本地。
