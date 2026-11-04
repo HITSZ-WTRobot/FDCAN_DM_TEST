@@ -239,7 +239,7 @@ static void motorFeedbackUpdate(TIM_HandleTypeDef*) // TIM3, 500 Hz.
     host_control->linkTick(HAL_GetTick()); // Host 500ms timeout does not wait for the task.
     for (auto* motor : dm_motors)
         motor->feedbackUpdate();
-    chassis_poll_ok = dm_chassis->pollDisabled(); // FDCAN2 only, 4 disable packets / 2ms.
+    chassis_poll_ok = dm_chassis->update(); // FDCAN2 periodic velocity/disable owner,500Hz.
     m2006_group->positionUpdate(); // TIM3 500Hz: position error compensation.
 }
 

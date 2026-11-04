@@ -115,7 +115,7 @@ device::Result zero_result = dm_motors[0]->setSoftwareZero();
 
 ## 四轮全向底盘结构（FDCAN2）
 
-本轮只完成真实设备与运动学库的组装、独立总线启动、失能轮询和反馈，不提供底盘串口收发、Ozone 控制、整车 Controller、定位或位置跟踪。没有空串口处理函数或自写运动学。原六电机仍按后文测试步骤工作，不能用其 `dm_motors` 变量控制底盘。
+底盘现在提供设备层 enable/disable/stop/setVelocity 与反馈接口，复用既有 Master、Omni4 和 JustEncoder。只开放车体系速度，不开放世界系或整车位姿目标。编码器后端用于库的真实反馈契约，不把积分里程宣称为绝对定位；不新增Ozone控制。原六DM和双M2006保持各自设备接口。
 
 ### 几何与电机参数
 
@@ -136,25 +136,26 @@ device::Result zero_result = dm_motors[0]->setSoftwareZero();
 - 公共内核时钟 100 MHz；Normal、FD+BRS、自动重传 Enable。Nominal Prescaler/Seg1/Seg2/SJW=5/15/4/4（1 Mbps）；Data=1/15/4/4（5 Mbps）。FDCAN 回调注册保持启用，FDCAN2 IT0/IT1 IRQ 均启用且为 5/0，由生成的 IRQ 调用 HAL_FDCAN_IRQHandler(&hfdcan2)。
 - FDCAN2 MessageRAMOffset=512（32 位字）；StdFiltersNbr=1、ExtFiltersNbr=0，RX FIFO0=16×64 B，TX FIFO=16×8 B、FIFO 模式，其他 RX FIFO/Buffer、TX Buffer/Event 数量为 0。当前 FDCAN1 占字区间 [0,353)，FDCAN2 占 [512,865)，不得重叠。应用使用上游标准过滤器及实测环回延迟补偿，offset 由实际数据段采样点算得 16 mtq。
 - 以上配置由用户在 CubeMX 完成，本轮已核对实际生成结果，未私改生成层；用户 `.ioc` 改动不随应用提交擅自暂存。其他工作区/新克隆必须先在 CubeMX 配齐 FDCAN2 并生成，不能只取应用提交就跳过此步骤。
-- 启动构造四个 DMMotor，再构造四个 MotorVelController（显式 InternalVel）、最后构造库 Omni4。固定存储显式构造，永久存活，无新增堆分配。构造和 start() 均不请求使能；启动检查滤波、延迟补偿与 CAN start 的返回值，失败不启动定时轮询、不自动恢复。
-- 当前 TIM3 每 2 ms 在全局唯一 Watchdog::EatAll() 后发送四帧**失能**请求；每台 500 次/s、一秒四台共 2000 次提交，失败不立即重试。与 FDCAN1 的 TIM6 分组发送相互独立。该节拍只用于失能状态通信，不宣称为未来运行时底盘控制周期。
-- 本轮没有可使能底盘的操作入口；Omni4 的内部轮速 update() 也不在启动路径调用。内部速度模式 setRef() 会立即发送，且上游控制权释放不保证硬件失能，因此后续接入真实 Controller 时须明确替换失能轮询调度，不能另起串口回调直接写四轮目标。
+- 四个 DMMotor、四个内部速度控制器、Omni4、JustEncoder、Master按依赖顺序构造，永久存活。构造/start不使能；启动返回滤波、延迟补偿和CAN启动结果。
+- TIM3的update()每2ms执行一次：健康运行时调用Master.controllerUpdate()，由真实Omni4分解并每轮发送一个速度参考；未运行/故障时每轮发送一个失能包。不再同时调用motion.update()造成重复发送。失败不立即重试。
+- enable()是任务接口，现有库会在此发送四台使能请求；随后等待新反馈确认四台都Enabled，才接受非零速度；没有自动使能。disable及链路故障在下一TIM3时隙发失能。上游mutex接口不从ISR调用；停机IRQ只取消运行授权，周期路径释放控制并发送失能。
+- 用户确认的命令上限：|vx|≤0.1m/s、|vy|≤0.1m/s、|wz|≤10deg/s、单轮≤30rpm。接受的整个矩形组合包络约29.3406rpm，不使用第二套运动学求轮速；实际轮速由库计算。非有限值/超限直接拒绝，保留旧参考，不默默缩放。
 
 ### 代码与反馈
 
-`UserCode/device/dm_omni_chassis.*` 的 DMOmniChassis 封装上述组合；`UserCode/app.cpp` 仅负责固定存储、FDCAN2 组装、启动及薄调度。`motion()` 返回真实 Omni4 对象，供后续既有 Controller 绑定，不绕过其受保护的速度分解接口。当前没有虚假定位对象或串口协议占位；后续通信层消费真正控制接口时再确定命令契约。
+`UserCode/device/dm_omni_chassis.*` 封装总线、对象、车体速度命令和500Hz更新；app只调用。setVelocity缓存真实库车体系速度目标，stop发送零速度参考而非位置锁定，disable请求停止输出。linkLost锁存故障和禁止使能，linkRestored只解除链路门禁，不自动使能。新enable要求四轮连接、失能且静止，随后清除软件故障并等待反馈确认；不改电机端模式或Flash。
 
 可观察 `chassis_startup`、`chassis_poll_ok` 和 `chassis_feedback`，它们不是控制命令：
 
 - `chassis_startup`：NotStarted=0、Ready=1、FilterFailed=2、DelayCompensationFailed=3、CanStartFailed=4。
 - `chassis_poll_ok` 仅表示最近一轮四帧全部提交硬件成功，不证明物理线上发送、收到应答或已经失能。
-- `chassis_feedback.wheels[0..3]` 按上表轮位顺序记录 connected、motor state、输出轴 angle_deg、velocity_rpm、torque_nm。约每 10 ms 在短临界区取得一次一致快照，电机连接 Watchdog 由 TIM3 推进，名义约 20 ms。connected=false 时其他值可能是旧缓存，不能作新鲜反馈。
+- `chassis_feedback.wheels[0..3]` 按上表轮位顺序记录connected/state/输出轴deg/rpm/Nm；完整快照另外包含target、enabled、enable_pending、fault、result。connected=false时其他测量可能是旧缓存，不能作新鲜反馈；enabled只是软件授权，实际使能需轮状态确认。
 - `velocity_in_body` 实际调用 Omni4::forwardGetVelocity()，单位为 vx/vy=m/s、wz=deg/s；x 向前、y 向左、逆时针为正。只有四轮均有合格新反馈且轮向正确时才有物理意义；它不是整车定位，也不校正打滑。
 - `chassis_config.reverse` 在构造时复制；运行后仅改该数组不会在线改变轮向。改代码或在初始化前设置，安全重启后生效；当前不提供在线调参/保存接口。电机端实际模式、反馈编号和轮向仍需在架空、动力安全的条件下确认。
 
 ### 本轮验证
 
-Debug 固件构建通过。临时 ASan/UBSan 原生烟测使用真实 DMOmniChassis、DM、MotorVelController、PID 依赖和 Omni4，CAN/HAL 采用边界模型：验证启动失败与重复启动、独立总线、500 次轮询共 2000 帧且全部为失能包、发送失败不重试、提交计数回绕、旧 Master ID/交叉 ID 拒收、Watchdog 断联、前进/横移/旋转/复合速度的 127/435 mm 分解与反解、方向配置。运动分解由临时测试刺激器通过库 Controller 控制权接口触发，不是固件新增的操作入口。临时测试遵守对象永久登记生命周期，未改上游代码；完成后移除临时文件。未烧录、驱动实物或测试真实总线仲裁/电气波形、实际反馈频率、轮向和带载稳定性。
+Debug构建、真实Master/Omni4/DM的ASan/UBSan主机烟测通过：失能一秒500次轮询共2000帧、使能反馈确认、最大组合速度分解（约29.3406rpm）、非法速度不覆盖目标、零速度停止仍保持使能、链路丢失延后到时隙失能、发送失败锁存。HAL/CAN为边界模型，未烧录或验证实物轮向、波形、带载稳定性。旧结构阶段无操作入口的描述已由上述设备接口替代。
 
 
 ## 双 M2006/C610（FDCAN3）
