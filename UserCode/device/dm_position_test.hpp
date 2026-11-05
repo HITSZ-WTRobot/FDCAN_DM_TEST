@@ -17,7 +17,8 @@ enum class Result : std::uint32_t
 {
     Ok = 0, Offline = 1, NotZeroed = 2, NotEnabled = 3, Busy = 4,
     InvalidParameters = 5, OutsideLimits = 6, NotStationary = 7,
-    MotorFault = 8, PlanningFailed = 9, InvalidCommand = 10, TransmitFailed = 11
+    MotorFault = 8, PlanningFailed = 9, InvalidCommand = 10, TransmitFailed = 11,
+    LinkFault = 12
 };
 
 enum class PositionKind { Joint, LinearActuator };

@@ -438,7 +438,7 @@ void M2006Position::linkLost()
 {
     ISRGuard guard;
     host_blocked_=true;
-    latchFault(Result::Offline);
+    latchFault(Result::LinkFault);
 }
 
 M2006Position::Feedback M2006Position::feedback() const

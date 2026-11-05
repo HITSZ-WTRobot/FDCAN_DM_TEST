@@ -7,13 +7,23 @@ namespace host
 namespace
 {
 constexpr std::uint16_t code(WireResult r){return static_cast<std::uint16_t>(r);}
+std::uint16_t code(device::Result r)
+{
+    using R=device::Result;
+    switch(r){case R::Ok:return 0;case R::Offline:return 1;case R::NotZeroed:return 2;
+    case R::NotEnabled:return 3;case R::Busy:return 4;case R::InvalidParameters:return 5;
+    case R::OutsideLimits:return 6;case R::NotStationary:return 7;case R::MotorFault:return 8;
+    case R::PlanningFailed:return 9;case R::InvalidCommand:return 10;case R::TransmitFailed:return 11;
+    case R::LinkFault:return code(WireResult::LinkFault);}return 10;
+}
 std::uint16_t code(device::M2006Position::Result r)
 {
     using R=device::M2006Position::Result;
     switch(r){case R::Ok:return 0;case R::Offline:return 1;case R::NotZeroed:return 2;
     case R::NotEnabled:return 3;case R::Busy:return 4;case R::OutsideLimits:return 6;
     case R::NotStationary:return 7;case R::PlanningFailed:return 9;case R::Fault:return 8;
-    case R::InvalidParameters:return 5;case R::TransmitFailed:return 11;}return 10;
+    case R::InvalidParameters:return 5;case R::TransmitFailed:return 11;
+    case R::LinkFault:return code(WireResult::LinkFault);}return 10;
 }
 std::uint16_t code(device::DMOmniChassis::Result r)
 {
@@ -94,7 +104,7 @@ Frame Control::state(const Frame& r,unsigned i)
         put16(p+2,(m.connected?1:0)|(m.zeroed?2:0)|(m.limits_configured?4:0)|
             (m.enabled?8:0)|(m.enable_pending?16:0)|(m.busy?32:0)|(m.motion_complete?64:0)|
             (m.fault?128:0)|(timedOut()?256:0));
-        put16(p+8,static_cast<std::uint16_t>(m.result));put16(p+10,m.motor_state);put32(p+12,m.feedback_count);
+        put16(p+8,code(m.result));put16(p+10,m.motor_state);put32(p+12,m.feedback_count);
         const float scale=linear(i)?device::DMPositionTest::LinearMmPerDegree:1.0f;
         putFloat(p+16,m.position_deg*scale);putFloat(p+20,m.velocity_rpm*6.0f*scale);
         putFloat(p+24,m.accepted_target_deg*scale);putFloat(p+28,m.reference_deg*scale);
@@ -181,7 +191,7 @@ Frame Control::dispatch(const Frame&r,unsigned i)
     if(i<6)
     {
         if(op==Opcode::Move)
-            result=static_cast<std::uint16_t>(linear(i)?dm_[i]->moveToMm(getFloat(r.data()+12)):
+            result=code(linear(i)?dm_[i]->moveToMm(getFloat(r.data()+12)):
                 dm_[i]->execute(device::Command::Move,getFloat(r.data()+12)));
         else
         {
@@ -195,7 +205,7 @@ Frame Control::dispatch(const Frame&r,unsigned i)
                     l.max_velocity_deg_s=getFloat(r.data()+12)/s;l.max_acceleration_deg_s2=getFloat(r.data()+16)/s;l.max_jerk_deg_s3=getFloat(r.data()+20)/s;}
                 else l={getFloat(r.data()+12),getFloat(r.data()+16),getFloat(r.data()+20),getFloat(r.data()+24),getFloat(r.data()+28)};
                 break;default:break;}
-            result=static_cast<std::uint16_t>(dm_[i]->execute(cmd,0,op==Opcode::SetLimits?&l:nullptr));
+            result=code(dm_[i]->execute(cmd,0,op==Opcode::SetLimits?&l:nullptr));
         }
     }
     else if(i<8)

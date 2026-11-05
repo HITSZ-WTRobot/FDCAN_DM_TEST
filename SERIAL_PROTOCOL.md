@@ -1,6 +1,6 @@
 # 串口设备控制协议 v2
 
-对应 `UserCode/communication/host_wire.*`、`host_control.*`、`host_uart.*`。本版接入六台DM（四伸缩毫米位置、两关节角位置）、双M2006和四轮全向底盘。v1不再接收：Move的伸缩单位及状态布局已改变，不能让旧客户端把角度静默解释成毫米；v1合法CRC请求返回BadVersion=100。本轮不修改/启动上位机工程，旧版“连接反馈不明显”按用户要求留待上位机检查，不宣称该现象已定位或修复。
+对应 `UserCode/communication/host_wire.*`、`host_control.*`、`host_uart.*`。本版接入六台DM（四伸缩毫米位置、两关节角位置）、双M2006和四轮全向底盘。v1不再接收：Move的伸缩单位及状态布局已改变，不能让旧客户端把角度静默解释成毫米；v1合法CRC请求返回BadVersion=100。当前串口修复保持v2报文布局和操作码不变，区分串口失联原因107与真正CAN反馈离线1。
 
 ## 1. 物理接口和通信方式
 
@@ -202,7 +202,7 @@ P16/20/24三个f32=实际vx m/s、vy m/s、wz deg/s；P28/32/36三个f32=请求v
 | 104 | UnknownOpcode | 未知命令 |
 | 105 | UnknownMotor | 非法逻辑编号/命令不适用于该设备 |
 | 106 | SequenceConflict | 最近相同sequence但整帧不同 |
-| 107 | LinkFault | 串口超时锁存期间Enable/Move/BodyVelocity被禁止 |
+| 107 | LinkFault | 串口超时门禁，或设备保留的串口失联故障原因；新心跳后仍可作为设备最近结果返回 |
 
 ## 10. 链路失联、恢复和客户端显示
 
@@ -211,6 +211,8 @@ P16/20/24三个f32=实际vx m/s、vy m/s、wz deg/s；P28/32/36三个f32=请求v
 距最后有效请求>=500ms，TIM3检查路径对**全部六DM、两M2006和底盘**锁存停机请求；不依赖正在求解曲线的串口任务返回。DM取消曲线并走原发送时隙失能，底盘在500Hz路径四轮失能，M2006取消授权/零电流并在正常1kHz聚合时隙发送，不立即重试或突发发送。
 
 超时锁存只能由**未命中最近请求缓存的新Heartbeat**解除；旧缓存Heartbeat重发只重放旧应答。缓存只有一项，不追溯更早历史，所以客户端恢复必须主动分配新sequence。解除链路门禁不清电机故障、不自动使能/续跑。M2006锁存故障后需失能稳定并显式SetZero清故障，再Enable；底盘在确认四轮连接/失能/静止后接受新的Enable；DM按设备条件明确Enable恢复。不得修改观察字段绕过条件。
+
+设备最近结果与当前链路门禁分别判断：DM内部 `Result::LinkFault=12`、M2006内部 `Result::LinkFault=11`，统一映射到串口107；真正CAN反馈失联仍映射1。State查询本身可成功（P0=0），同时P8=107表示设备尚未人工清除的串口故障；新心跳清除host_link_timeout标志，不把P8改成成功，也不会恢复运动。内部枚举原数值不变，不能直接按内部12/11解码协议。
 
 显示建议：连上串口≠电机在线；从Info发现设备后，新State查询逐台显示connected/zeroed/enabled/pending/busy/complete/fault及result。connected=false时测量可能是旧缓存。Move完成须新反馈connected=true、无fault、busy=false、motion_complete=true；底盘是速度模式，没有“目标到位”。响应丢失、发送成功、CRC正确或Disable ACK都不能单独证明物理停机。
 
