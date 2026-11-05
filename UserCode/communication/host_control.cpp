@@ -80,7 +80,8 @@ void Control::linkTick(std::uint32_t now)
     {
         timed_out_.store(true);
         for(unsigned i=0;i<6;++i)dm_[i]->linkLost();
-        chassis_.linkLost();dji_.first().linkLost();dji_.second().linkLost();
+        chassis_.linkLost();
+        for (auto* motor : dji_) motor->linkLost();
     }
 }
 Frame Control::state(const Frame& r,unsigned i)
@@ -102,7 +103,7 @@ Frame Control::state(const Frame& r,unsigned i)
     }
     else if(i<8)
     {
-        const auto s=(i==6?dji_.first():dji_.second()).feedback();
+        const auto s=dji_[i-6]->feedback();
         put16(p+2,(s.connected?1:0)|(s.zeroed?2:0)|8U*(s.enabled?1:0)|
             (s.busy?32:0)|(s.motion_complete?64:0)|(s.fault?128:0)|(timedOut()?256:0));
         put16(p+8,code(s.result));put16(p+10,0xffff);put32(p+12,s.feedback_count);
@@ -140,7 +141,7 @@ Frame Control::parameters(const Frame&r,unsigned i)
     }
     else if(i<8)
     {
-        const auto c=(i==6?dji_.first():dji_.second()).controlParameters();
+        const auto c=dji_[i-6]->controlParameters();
         const float values[]{c.velocity_pid.Kp,c.velocity_pid.Ki,c.velocity_pid.Kd,c.velocity_pid.abs_output_max,
             c.position_pd.Kp,c.position_pd.Kd,c.position_pd.abs_output_max,
             c.profile.max_spd,c.profile.max_acc,c.profile.max_jerk,c.finish_deg,c.stationary_rpm};
@@ -199,7 +200,7 @@ Frame Control::dispatch(const Frame&r,unsigned i)
     }
     else if(i<8)
     {
-        auto&m=i==6?dji_.first():dji_.second();
+        auto& m=*dji_[i-6];
         switch(op){case Opcode::Enable:result=code(m.enable());break;case Opcode::Disable:result=code(m.disable());break;
         case Opcode::Stop:result=code(m.stop());break;case Opcode::SetZero:result=code(m.setSoftwareZero());break;
         case Opcode::Move:result=code(m.moveToDegrees(getFloat(r.data()+12)));break;default:break;}
@@ -226,7 +227,8 @@ void Control::handle(const Frame&r,std::uint32_t now)
     const auto op=static_cast<Opcode>(r[6]);
     {ISRGuard guard;
         if(op==Opcode::Heartbeat){timed_out_.store(false);for(unsigned i=0;i<6;++i)dm_[i]->linkRestored();
-            chassis_.linkRestored();dji_.first().linkRestored();dji_.second().linkRestored();}
+            chassis_.linkRestored();
+            for (auto* motor : dji_) motor->linkRestored();}
         if(!timedOut())last_valid_.store(now);
         seen_.store(true);
     }

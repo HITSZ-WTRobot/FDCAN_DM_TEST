@@ -33,7 +33,7 @@ S3519 位置口径保留用户此前实测及上游驱动的处理：反馈位�
 | 命令任务 | 约 1 ms 服务 | 串口/原 DM 命令、底盘反馈观察、M2006 首次稳定归零服务；不是控制时基、不自动使能 |
 | TIM7 | 100 Hz | DM 轨迹采样，以及 M2006 S 曲线位置参考/速度前馈采样（dt=0.01 s） |
 | TIM3 | 500 Hz | DM反馈/故障、底盘速度参考或失能输出、M2006位置PD/状态、全设备串口超时门禁；唯一全局Watchdog推进者 |
-| TIM6 | 2 kHz | 原 DM 两组三台交替发送；M2006Group 内部每2次调用执行一次速度PID并聚合发送，即1 kHz |
+| TIM6 | 2 kHz | 原 DM 两组三台交替发送；每第二次回调更新两台独立 M2006 的速度PID，再统一聚合发送，即1 kHz |
 | TIM23 | HAL 系统时基 | 保留生成配置，不用于电机控制 |
 
 发送组 A 为 `[0,1,2]`（`0x0A/0x0B/0x0C`），组 B 为 `[3,4,5]`（`0x0D/0x0E/0x0F`）。组间软件提交间隔 0.5 ms，同一台周期 1 ms。MIT、使能、失能均走该唯一发送入口；发送失败不在当前时隙立即重试。CAN 仲裁、排队和错误重发仍可能改变实际线上时刻；分组不等于降低平均负载。
@@ -85,7 +85,7 @@ MIT 初始参数为 `kp=5.0`、`kd=0.5`、`torque_ff_nm=0.0`，到位误差阈�
 
 上电不会自动使能。每台收到 50 次新的失能、静止且位置稳定反馈后尝试建立软件零点。两个关节初次及后续软件设零都以新原点重新建立 **−180°～+180°**，不再平移旧限位；这会改变所允许的实际运动区域，操作者负责确认空间。若新原点的完整 ±180° 范围不能编码，则拒绝此次设零，不截断范围、不修改旧零点/目标/已应用参数；首次失败保持 zeroed/limits_configured=false。四个伸缩不检查软件 min/max 行程，但当前零点和每个轨迹参考仍必须可编码；limits_configured 对伸缩只表示轨迹动态参数已校验。
 
-固定 MIT 参数入口为 [UserCode/app.cpp](UserCode/app.cpp) 的 `dm_control`，在设备构造时复制；初始化后只改数组不会在线生效。修改代码、构建并安全重启，或在初始化前设置。关节限位可在 ±180° 内缩小，动态约束支持失能时显式提交；伸缩 min_deg/max_deg 不作为行程限位。
+设备参数统一入口为 [UserCode/config.hpp](UserCode/config.hpp)：`config::dm_motor_parameters` 为六台 DM 的编号、型号、量程及方向，`config::dm_control` 为 MIT 参数，`config::joint_motion_limits` / `config::linear_motion_dynamics` 为轨迹约束；底盘方向为 `config::chassis.reverse`，M2006 编号/方向和控制参数分别为 `config::m2006_motor_parameters` / `config::m2006_control`。参数在初始化时被复制，初始化后只改配置变量不会在线生效；修改代码、构建并安全重启，或在初始化前设置。关节限位可在 ±180° 内缩小，动态约束支持失能时显式提交；伸缩 min_deg/max_deg 不作为行程限位。
 
 ### 伸缩毫米位置与软件设零接口
 
@@ -151,7 +151,7 @@ device::Result zero_result = dm_motors[0]->setSoftwareZero();
 - `chassis_poll_ok` 仅表示最近一轮四帧全部提交硬件成功，不证明物理线上发送、收到应答或已经失能。
 - `chassis_feedback.wheels[0..3]` 按上表轮位顺序记录connected/state/输出轴deg/rpm/Nm；完整快照另外包含target、enabled、enable_pending、fault、result。connected=false时其他测量可能是旧缓存，不能作新鲜反馈；enabled只是软件授权，实际使能需轮状态确认。
 - `velocity_in_body` 实际调用 Omni4::forwardGetVelocity()，单位为 vx/vy=m/s、wz=deg/s；x 向前、y 向左、逆时针为正。只有四轮均有合格新反馈且轮向正确时才有物理意义；它不是整车定位，也不校正打滑。
-- `chassis_config.reverse` 在构造时复制；运行后仅改该数组不会在线改变轮向。改代码或在初始化前设置，安全重启后生效；当前不提供在线调参/保存接口。电机端实际模式、反馈编号和轮向仍需在架空、动力安全的条件下确认。
+- `config::chassis.reverse`（`UserCode/config.hpp`）在构造时复制；运行后仅改该数组不会在线改变轮向。改代码或在初始化前设置，安全重启后生效；当前不提供在线调参/保存接口。电机端实际模式、反馈编号和轮向仍需在架空、动力安全的条件下确认。
 
 ### 本轮验证
 
@@ -162,9 +162,9 @@ Debug构建、真实Master/Omni4/DM的ASan/UBSan主机烟测通过：失能一�
 
 ### 分层与固定参数
 
-使用未修改的 `DJIMotor`、`MotorVelController(ExternalPID)` 和两个独立的 `MotorTrajectory<1>`。`device/m2006_position.*` 管单台设备的轨迹、PID/PD、零点和故障；`device/m2006_group.*` 管两台组装、独立 CAN 启动/回调、更新节拍分发和聚合发送。`app.cpp` 只提供参数/固定存储、对象组装及薄调用，不放新设备的反馈解码、协议分发、循环分频、控制或发包实现。
+使用未修改的 `DJIMotor`、`MotorVelController(ExternalPID)` 和两个独立的 `MotorTrajectory<1>`。`device/m2006_position.*` 只定义单台设备，封装轨迹、PID/PD、零点、故障和本台反馈观察；`app.cpp` 像 DM 一样分别构造两台实例，保存在 `m2006_motors[0]` / `[1]`，串口直接借用这些实例。没有拥有两台电机的组类，也没有额外 CAN 封装文件。已有 CAN 初始化和定时回调直接调用驱动库，统一聚合发送一次；设备内部不发送共享报文。参数统一放在 `UserCode/config.hpp`，app 仅组装、初始化和薄调度。
 
-以下来自用户提供的参数图片，构造时复制；改 `m2006_control` 数组不在线生效。PID/PD 库使用离散增益，不额外乘除 dt，不照搬参考 M3508 工程的增益或外接减速比：
+以下来自用户提供的参数图片，构造时复制；改 `config::m2006_control` 数组不在线生效。PID/PD 库使用离散增益，不额外乘除 dt，不照搬参考 M3508 工程的增益或外接减速比：
 
 | 项目 | 参数 | 执行节拍/单位 |
 |---|---|---|
@@ -191,19 +191,20 @@ Debug构建、真实Master/Omni4/DM的ASan/UBSan主机烟测通过：失能一�
 既有单个命令任务通过串口服务调用设备接口，不能在UART/CAN ISR求解曲线，也不能多个任务并发操作同一设备。上电只运行自动归零服务，不自动调用下面的使能或运动示例；串口逻辑编号为21/22（hex），不是反馈CAN ID。
 
 ```cpp
-auto& a = m2006_group->first();  // C610 ID1
-auto& b = m2006_group->second(); // C610 ID2，目标独立
+auto& a = *m2006_motors[0]; // 独立 M2006Position，C610 ID1
+auto& b = *m2006_motors[1]; // 同一个类的另一个实例，C610 ID2
 // 必须先取得新反馈，确认connected、zeroed、无fault及机械条件。
 device::M2006Position::Result enabled = a.enable();
 device::M2006Position::Result accepted = a.moveToDegrees(90.0f);
-auto states = m2006_group->feedback(); // 两台一致观察快照
+auto state_a = a.feedback(); // 各自的短临界区快照，不是两台同时采样
+auto state_b = b.feedback();
 ```
 
-这是调用格式，不是可以忽略错误的连续操作流程：检查 enable() 的返回值成功后才发Move，并检查本次结果。`first()/second()` 返回各自设备对象，不泄露裸电机/PID控制权。各台还有 `stop()`（取消轨迹、当前位置保持，仍有力矩）、`disable()`（释放控制、缓存零电流）、`setSoftwareZero()`（失能静止后重设零点）。moveToDegrees在busy时返回Busy，保留原曲线/目标；库规划失败也保留原轨迹/目标，不报告成功。所有命令只更新状态/电流缓存，不直接发CAN。
+这是调用格式，不是可以忽略错误的连续操作流程：检查 enable() 的返回值成功后才发Move，并检查本次结果。两台分别通过自己的设备接口操作，不泄露裸电机/PID控制权。各台还有 `stop()`（取消轨迹、当前位置保持，仍有力矩）、`disable()`（释放控制、缓存零电流）、`setSoftwareZero()`（失能静止后重设零点）。moveToDegrees在busy时返回Busy，保留原曲线/目标；库规划失败也保留原轨迹/目标，不报告成功。所有命令只更新状态/电流缓存，不直接发CAN。
 
 Result数值：Ok=0、Offline=1、NotZeroed=2、NotEnabled=3、Busy=4、OutsideLimits=5、NotStationary=6、PlanningFailed=7、Fault=8、InvalidParameters=9、TransmitFailed=10。它独立于DM的Result枚举，不可混用。查询state.result是最近结果/故障原因，不替代本次函数返回值。
 
-Feedback包含result、connected、zeroed、enabled、busy、motion_complete、fault、position_deg、velocity_rpm、target_deg、velocity_reference_rpm、feedback_count。velocity_reference_rpm是最近实际速度PID使用的“前馈+位置修正”总参考，不是假造的纯前馈遥测。断线时测量可为旧值。`startup()`返回NotStarted=0、Ready=1、FilterFailed=2、ReceiveCallbackFailed=3、CanStartFailed=4；启动失败不自动恢复。`transmitFailures()`只统计硬件提交失败，不证明实际线上发送。
+Feedback包含result、connected、zeroed、enabled、busy、motion_complete、fault、position_deg、velocity_rpm、target_deg、velocity_reference_rpm、feedback_count。velocity_reference_rpm是最近实际速度PID使用的“前馈+位置修正”总参考，不是假造的纯前馈遥测。断线时测量可为旧值。共享总线初始化失败通过 `dm_startup` 报告，不自动恢复；`m2006_tx_failures` 只统计硬件提交失败，不证明实际线上发送。
 
 ### CAN3 与定时交接
 
@@ -211,15 +212,15 @@ FDCAN3 RX=PD12、TX=PD13，第三路独立收发器和FDCAN3H/L/GND。100MHz内�
 
 MessageRAMOffset=1024（32位字），RX FIFO0=16×64bytes，TX FIFO=16×8bytes，其他分配数量0；占字区间[1024,1377)，不与前两路重叠。**当前CAN库即便Classic模式也要求已分配RX元素至少64bytes**，因此不能将RX元素改成8bytes，亦不要把元素数量16改成64。FDCAN3 IT0/IT1均5/0，HAL回调注册已启用。用户在CubeMX配置生成，代码仅启动/注册，不修改生成层；本轮不擅自提交用户.ioc。
 
-TIM7=100Hz、TIM3=500Hz原节拍不改；TIM6仍2kHz驱动原DM分组，调用 `M2006Group::transmitTick()`，设备组内部每两次执行一次两台速度PID并用 `DJIMotor::SendIqCommand(group1_4)` 发送一帧0x200。未注册的槽3/4固定零，不发送无用的0x1FF组。停止、失能、故障也不从别处插入聚合发送；失败只锁存并清零缓存，下一正常1ms时隙发零，不立即重试。全局Watchdog依然只在TIM3推进一次，名义反馈失联窗口约20ms，不能又在1kHz路径重复推进。
+TIM7=100Hz、TIM3=500Hz原节拍不改，回调逐台调用 `profileUpdate()` / `positionUpdate()`；TIM6仍2kHz驱动原DM分组，在每第二次回调逐台执行 `velocityUpdate()`，再直接用 `DJIMotor::SendIqCommand(group1_4)` 发送一帧0x200。未注册的槽3/4固定零，不发送无用的0x1FF组。停止、失能、故障也不从别处插入聚合发送；失败只逐台锁存并清零缓存，下一正常1ms时隙发零，不立即重试。全局Watchdog依然只在TIM3推进一次，名义反馈失联窗口约20ms，不能又在1kHz路径重复推进。
 
 反馈失联会取消控制/轨迹、零电流、锁存fault并使软件零点失效；恢复反馈不会自动归零或续跑，需操作者确认静止后显式setSoftwareZero，再明确enable及新目标。发送失败也锁存故障；成功的失能稳定软件设零可清锁存。零电流是电流请求，不代表机械已停、硬件切电或重力负载安全；真正输出仍依赖总线和电调，MCU停机/断电/总线故障不保证能送出零帧。执行器当前反馈超出范围会停用，实际反馈允许约两编码器LSB的量化容差，目标本身仍严格0～360；没有硬限位保护。
 
 ### 验证证据与边界
 
-Debug 固件构建通过。临时 ASan/UBSan 烟测直接包含当前 app.cpp 并运行实际设备组、DM、Omni4、DJI、MotorTrajectory、PID/PD 和 SCurve，仅HAL/CAN/电机机构用主机边界模型。初始健康1秒实际调用100次轨迹入口、500次位置入口和2000次TIM6入口，新增总线提交1000帧Classic 0x200，原DM总线6000帧、底盘总线2000帧；上电全部DJI输出槽为零。后续独立90°/240°目标、360°与0°端点到位、软件重归零、停止保持与取消不误报到位、失联后保持故障且不自动恢复、显式归零恢复、越界/NaN/Busy拒绝、发送失败无即时重试及后续零电流均已在模型中观察。
+本次独立实例及集中配置整改：Debug 固件构建通过；临时 ASan/UBSan 烟测直接包含实际 app.cpp、串口 DMA/协议服务、单台设备实现与未修改的 DM、Omni4、DJI、MotorTrajectory、PID/PD、SCurve，仅HAL/CAN/机构使用主机边界模型。健康1秒调用100次轨迹入口、500次位置入口和2000次TIM6入口，M2006总线恰好提交1000帧Classic 0x200，原DM总线6000帧、底盘2000帧。模型中观察两台独立构造及参数副本、反馈按ID分离、串口v2分别接受30°/90°并各自到位、只给第一台失能/重归零不改变第二台目标或使能、500ms超时停用及发送失败无即时重试，后续共享帧电流槽为零。
 
-模型中使用电流驱动的一阶轮速响应，参数不是M2006实物辨识结果；最初7.5秒观察窗口尚未到位（两个目标仍在收敛），延长观察后才满足0.5°/0.1rpm判据，未为通过测试修改用户PID或放宽到位阈值。模拟到位不能证明实物响应时间、带载稳定、真实电流或机械安全。未烧录、复位目标或运行真实机构；默认正向、C610编号、反馈频率和实际接线仍须操作者确认。临时烟测完成后移除，不新增平行工程构建体系。
+模型中使用电流驱动的一阶轮速响应，参数不是M2006实物辨识结果；软件设零按新的失能静止反馈累计稳定样本，不以固定延时视为完成。模拟到位不能证明实物响应时间、带载稳定、真实电流或机械安全。本轮未烧录、复位目标或运行真实机构，也未修改用户控制参数、硬件配置或串口格式；默认正向、C610编号、反馈频率和实际接线仍须操作者确认。临时烟测完成后移除，不新增平行工程构建体系。
 
 
 ## 串口上位机控制
@@ -321,11 +322,11 @@ command=0，result=0
 
 ## 目录和维护
 
-- [UserCode/app.cpp](UserCode/app.cpp)：参数、设备部位映射、初始化、任务及薄定时调度。
+- [UserCode/app.cpp](UserCode/app.cpp)：独立设备实例组装、初始化、任务及薄定时调度。
+- [UserCode/config.hpp](UserCode/config.hpp)：原 app 中的 DM、底盘方向、M2006 编号/控制和轨迹参数统一入口；构造时复制，不是在线调参接口。
 - [UserCode/device/dm_position_test.hpp](UserCode/device/dm_position_test.hpp)、[实现](UserCode/device/dm_position_test.cpp)：命令、软件零点、运动限值、轨迹与 MIT 输出。
 - [UserCode/communication/](UserCode/communication/)：固定帧/CRC 编解码、UART DMA 生命周期、上位机命令仲裁及状态应答；协议见 [SERIAL_PROTOCOL.md](SERIAL_PROTOCOL.md)。
 - [UserCode/device/dm_omni_chassis.hpp](UserCode/device/dm_omni_chassis.hpp)、[实现](UserCode/device/dm_omni_chassis.cpp)：FDCAN2 四轮电机、内部轮速控制器与 Omni4 组合，以及失能通信/反馈。
-- [UserCode/device/m2006_group.hpp](UserCode/device/m2006_group.hpp)、[实现](UserCode/device/m2006_group.cpp)：FDCAN3 双电机组、反馈注册、分频与唯一聚合发送。
 - [UserCode/device/m2006_position.hpp](UserCode/device/m2006_position.hpp)、[实现](UserCode/device/m2006_position.cpp)：单台 M2006 的外部轨迹前馈、位置PD/速度PID、零点/启停/故障和反馈快照。
 - [DMDebug.ioc](DMDebug.ioc)：CubeMX 配置唯一来源。
 - `Modules/`：cpkg 管理的 Git 子模块；本工程只调用上游接口，不维护私改驱动副本。

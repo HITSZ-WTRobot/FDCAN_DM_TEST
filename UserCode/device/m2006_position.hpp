@@ -65,7 +65,6 @@ public:
     Result setSoftwareZero();
     void service(); // First boot auto-zero and deferred fault-history reset; never enables.
 
-    void feedbackReceived() noexcept; // Observer runs after the valid raw DJI callback.
     void profileUpdate();             // 100 Hz: real profileUpdate(0.01f).
     void positionUpdate();            // 500 Hz: fresh-sample observation + real errorUpdate.
     void velocityUpdate();            // 1 kHz: real controllerUpdate; cached output only.
@@ -77,6 +76,7 @@ public:
 
 private:
     using Trajectory = trajectory::MotorTrajectory<1>;
+    void feedbackReceived(const bsp::can::FrameView& frame) noexcept;
     static motors::DJIMotor::Config manualZeroConfig(const motors::DJIMotor::Config& config);
     [[nodiscard]] bool validParameters(const motors::DJIMotor::Config& config) const;
     [[nodiscard]] bool inBounds(float position) const;
@@ -91,6 +91,7 @@ private:
     motors::DJIMotor motor_;
     controllers::MotorVelController controller_;
     const Config config_;
+    const std::uint8_t id_;
     const bool parameters_valid_;
     const float encoder_tolerance_deg_; // Two real output encoder LSB, including 36:1.
     std::optional<Trajectory> trajectory_;

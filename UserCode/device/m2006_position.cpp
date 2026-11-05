@@ -32,12 +32,15 @@ motors::DJIMotor::Config M2006Position::manualZeroConfig(const motors::DJIMotor:
 M2006Position::M2006Position(const motors::DJIMotor::Config& motor_config, const Config& config) :
     motor_(manualZeroConfig(motor_config)),
     controller_(&motor_, {config.velocity_pid, controllers::ControlMode::ExternalPID}),
-    config_(config), parameters_valid_(validParameters(motor_config)),
+    config_(config), id_(motor_config.id1), parameters_valid_(validParameters(motor_config)),
     encoder_tolerance_deg_(positiveFinite(motor_config.reduction_rate)
                                    ? 2.0f * 360.0f / 8192.0f / 36.0f / motor_config.reduction_rate
                                    : 0.0f)
 {
     // No enable, hardware startup or transmission. Invalid configuration stays inert.
+    // DJIMotor registered its decoder during member construction, before this observer.
+    if (motor_config.can.register_callback<&M2006Position::feedbackReceived>(*this) != bsp::can::Status::Ok)
+        Error_Handler();
     if (parameters_valid_)
         trajectory_.emplace(&controller_, config_.profile, config_.position_pd, config_.finish_deg);
     else
@@ -350,8 +353,13 @@ void M2006Position::service()
         setSoftwareZero(); // Rechecks latest connection, velocity and stability under guard.
 }
 
-void M2006Position::feedbackReceived() noexcept
+void M2006Position::feedbackReceived(const bsp::can::FrameView& frame) noexcept
 {
+    if (frame.header.id_type != bsp::can::IdType::Standard ||
+        frame.header.format != bsp::can::FrameFormat::Classic ||
+        frame.header.type != bsp::can::FrameType::Data || frame.data.size() != 8 ||
+        frame.header.id != 0x200U + id_)
+        return;
     ++state_.feedback_count;
     state_.position_deg = motor_.getAngle();
     state_.velocity_rpm = motor_.getVelocity();
