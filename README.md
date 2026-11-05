@@ -2,7 +2,7 @@
 
 STM32H723VET6 三 FDCAN 串口控制工程：FDCAN1为六台DM（四伸缩毫米位置、两关节角位置），FDCAN2为四轮全向底盘车体系速度控制，FDCAN3为两台独立M2006的外部PID/PD与轨迹速度前馈。业务在device层、串口编解码/命令分发在communication层，app只组装和调用；底盘/M2006没有新增Ozone控制邮箱。
 
-> 当前分支feat/uart-control-complete来自旧串口分支合并新增设备后的基线（合并提交37808f8），不是未整合的独立底盘分支。旧版连接反馈不明显的现象按用户要求留待后续上位机检查，本轮未诊断或改动前端。构建和主机行为烟测不代表串口实板、带载稳定或机械安全已验证。
+> 三总线串口v2功能与配套 `.ioc` 已通过云端 [PR #2](https://github.com/HITSZ-WTRobot/FDCAN_DM_TEST/pull/2) 合并。本轮在从合并后main建立的 `fix/serial-session-timeout` 分支修复串口间歇超时和故障误标；用户反馈其他功能正常、控制参数尚未整定。保留500ms失联保护，不修改PID、轨迹、外设参数，不自动恢复运动。
 
 上位机逐项操作、通信通过判据和按反馈调参的步骤见 [上位机电机通信检查与调参步骤](MOTOR_TEST_GUIDE.md)。
 
@@ -204,7 +204,7 @@ auto state_b = b.feedback();
 
 这是调用格式，不是可以忽略错误的连续操作流程：检查 enable() 的返回值成功后才发Move，并检查本次结果。两台分别通过自己的设备接口操作，不泄露裸电机/PID控制权。各台还有 `stop()`（取消轨迹、当前位置保持，仍有力矩）、`disable()`（释放控制、缓存零电流）、`setSoftwareZero()`（失能静止后重设零点）。moveToDegrees在busy时返回Busy，保留原曲线/目标；库规划失败也保留原轨迹/目标，不报告成功。所有命令只更新状态/电流缓存，不直接发CAN。
 
-Result数值：Ok=0、Offline=1、NotZeroed=2、NotEnabled=3、Busy=4、OutsideLimits=5、NotStationary=6、PlanningFailed=7、Fault=8、InvalidParameters=9、TransmitFailed=10。它独立于DM的Result枚举，不可混用。查询state.result是最近结果/故障原因，不替代本次函数返回值。
+Result数值：Ok=0、Offline=1、NotZeroed=2、NotEnabled=3、Busy=4、OutsideLimits=5、NotStationary=6、PlanningFailed=7、Fault=8、InvalidParameters=9、TransmitFailed=10、LinkFault=11。它独立于DM的Result枚举，不可混用；串口协议将M2006的LinkFault=11映射为107，TransmitFailed=10映射为11。查询state.result是最近结果/故障原因，不替代本次函数返回值。
 
 Feedback包含result、connected、zeroed、enabled、busy、motion_complete、fault、position_deg、velocity_rpm、target_deg、velocity_reference_rpm、feedback_count。velocity_reference_rpm是最近实际速度PID使用的“前馈+位置修正”总参考，不是假造的纯前馈遥测。断线时测量可为旧值。共享总线初始化失败通过 `dm_startup` 报告，不自动恢复；`m2006_tx_failures` 只统计硬件提交失败，不证明实际线上发送。
 
@@ -212,7 +212,7 @@ Feedback包含result、connected、zeroed、enabled、busy、motion_complete、f
 
 FDCAN3 RX=PD12、TX=PD13，第三路独立收发器和FDCAN3H/L/GND。100MHz内核，Classic/Normal、自动重传Enable；当前用户生成Nominal Prescaler=5、Seg1=14、Seg2=5、SJW=4，速率1Mbps、采样点75%；Data字段在Classic模式无效，不开BRS或TDC。StdFilters=1、ExtFilters=0；库掩码0x200/0x7F0，实例严格接受自己的Classic标准数据帧DLC8。
 
-MessageRAMOffset=1024（32位字），RX FIFO0=16×64bytes，TX FIFO=16×8bytes，其他分配数量0；占字区间[1024,1377)，不与前两路重叠。**当前CAN库即便Classic模式也要求已分配RX元素至少64bytes**，因此不能将RX元素改成8bytes，亦不要把元素数量16改成64。FDCAN3 IT0/IT1均5/0，HAL回调注册已启用。用户在CubeMX配置生成，代码仅启动/注册，不修改生成层；本轮不擅自提交用户.ioc。
+MessageRAMOffset=1024（32位字），RX FIFO0=16×64bytes，TX FIFO=16×8bytes，其他分配数量0；占字区间[1024,1377)，不与前两路重叠。**当前CAN库即便Classic模式也要求已分配RX元素至少64bytes**，因此不能将RX元素改成8bytes，亦不要把元素数量16改成64。FDCAN3 IT0/IT1均5/0，HAL回调注册已启用。外设由用户在CubeMX配置生成，代码仅启动/注册；现有 `.ioc` 已随功能提交，后续配套配置同样随对应功能核对提交，不擅自改写或重新生成。
 
 TIM7=100Hz、TIM3=500Hz原节拍不改，回调逐台调用 `profileUpdate()` / `positionUpdate()`；TIM6仍2kHz驱动原DM分组，在每第二次回调逐台执行 `velocityUpdate()`，再直接用 `DJIMotor::SendIqCommand(group1_4)` 发送一帧0x200。未注册的槽3/4固定零，不发送无用的0x1FF组。停止、失能、故障也不从别处插入聚合发送；失败只逐台锁存并清零缓存，下一正常1ms时隙发零，不立即重试。全局Watchdog依然只在TIM3推进一次，名义反馈失联窗口约20ms，不能又在1kHz路径重复推进。
 
@@ -307,8 +307,9 @@ command=0，result=0
 | 9 | PlanningFailed |
 | 10 | InvalidCommand |
 | 11 | TransmitFailed |
+| 12 | LinkFault（串口超时，串口协议统一映射为107） |
 
-通信故障优先检查电机端 Master ID 是否已从旧 `0x20` 改为对应的 `0x2A～0x2F`，再检查编号、总线时序、接线、供电和终端电阻。全局 RX 计数不能替代每台 `feedback_count`。`dm_tx_submitted_frames` 只表示硬件 FIFO 提交，不证明线上发送成功或动作完成。
+先区分串口与CAN：DM的 `result=12/LinkFault` 表示串口500ms超时，真正CAN离线仍为 `result=1/Offline`。串口恢复后仍保留设备故障，不自动恢复运动；`host_link_timeout=false` 不能否定之前发生过超时。CAN故障再检查电机端 Master ID、编号、总线时序、接线、供电和终端。全局RX计数不能替代每台 `feedback_count`；`dm_tx_submitted_frames` 只表示硬件FIFO提交，不证明线上发送成功或动作完成。
 
 软件看门狗由 TIM3 推进，名义失联窗口约 20 ms。故障会取消轨迹、锁存并请求失能，不自动重启，也不自动清除电机内部错误。排除原因、确认失能和静止后，再人工 Enable。不要改内部状态标志绕过检查。
 
@@ -321,6 +322,7 @@ command=0，result=0
 - TIM6 2 kHz 的主机时序验证覆盖 32,820 个发送时隙：每次三台、两组交替；健康的一秒窗口每台提交 1,000 帧。不模拟真实位级仲裁、重发或电气故障，不能代替实板波形与负载检查。
 - 实板结果：用户反馈“代码已经烧录并测试过可行了”；工具未直接操作目标，也未为重复确认该结果重跑硬件测试。当前 Debug 构建及主机烟测通过，烟测为本轮临时验证，不是仓库提供的独立测试命令。
 - 串口v2完整烟测直接包含真实app、UART DMA适配、协议服务及全部真实设备/控制库，仅HAL/CAN/机构采用主机边界模型，ASan/UBSan通过：九设备发现/状态、四轮反馈、毫米/角度单位、DM20mm到位、双M2006独立30/90°到位、低速底盘组合命令/超限拒绝/零速停止、参数与毫米动态约束、重复序号不重执行/冲突/Busy、v1拒绝/坏填充/CRC重同步、500ms全设备停用及人工恢复。广播失能逐台返回结果；M2006可已清零电流但仍保留先前故障结果，不能把全体ACK假设为全成功。未烧录、操作上位机或确认旧前端现象已消失。
+- 串口超时分类修复：本轮Debug构建及真实app/UART DMA适配/协议/设备/驱动控制库的ASan/UBSan主机烟测通过。持续注入CAN反馈时499ms不超时、500ms触发；九设备State保留串口原因107且反馈仍在线；新心跳不恢复运动，DM需显式使能，M2006需失能稳定、设零后使能。独立中断CAN反馈22ms仍得到Offline→协议1。仅HAL/CAN/RTOS使用边界模型，未烧录或访问真实COM/电机，不代表现场故障已实板消失。
 
 ## 目录和维护
 

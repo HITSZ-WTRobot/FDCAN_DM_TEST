@@ -30,7 +30,7 @@ public:
     enum class Result : std::uint32_t
     {
         Ok, Offline, NotZeroed, NotEnabled, Busy, OutsideLimits, NotStationary,
-        PlanningFailed, Fault, InvalidParameters, TransmitFailed
+        PlanningFailed, Fault, InvalidParameters, TransmitFailed, LinkFault
     };
 
     struct Feedback

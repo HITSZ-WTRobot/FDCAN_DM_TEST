@@ -407,7 +407,7 @@ void DMPositionTest::linkLost()
 {
     disableOutput(true);
     command = Command::None;
-    result = Result::Offline;
+    result = Result::LinkFault;
     host_link_blocked_ = true;
 }
 
