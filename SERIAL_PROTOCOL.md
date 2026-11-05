@@ -28,7 +28,7 @@ USART1：**115200 baud、8数据位、1停止位、无校验、无流控**，PA9
 
 41～44只作为四轮状态应答的轮位标签，不接受直接单轮动作。轮位顺序固定为右前、左前、左后、右后，反馈Master ID为2B/2A/29/2C。Info返回的九设备顺序就是上表顺序。
 
-位置语义：所有Move都是**相对当前软件零点的绝对目标**，不是增量。DM伸缩按用户标称226.2mm/输出轴圈换算，不再额外乘除内置减速比；不设软件行程区间，但当前PMAX/19.203坐标映射仍只能表达协议原点附近约±23.434mm，任意软件零点下的剩余正负行程不一定对称。不能因226.2mm/圈就发送226.2mm并期待成功，超出可编码范围返回OutsideLimits，不截断或修改PMAX。
+位置语义：所有Move均为相对软件零点的绝对目标，不是增量。伸缩按226.2mm/输出轴圈换算；本版四台位置伸缩PMAX改为125rad，配合既有19.203位置口径可表达协议原点两侧约±234.3439mm，用于用户±200mm需求。电机端必须支持且同步125，否则比例错误10倍。无软件行程min/max，但仍检查绝对编码范围；若软件零点距协议原点超过约34.3439mm，不能保证两侧均有200mm。超出编码范围返回OutsideLimits，不截断。
 
 DM关节每次软件零点建立后为−180～+180deg；M2006为0～360deg（内置36:1减速后的输出轴），不取最短角或把360取模为0。默认正向均未经本轮实板验证。
 
@@ -167,13 +167,13 @@ P16/20/24三个f32=实际vx m/s、vy m/s、wz deg/s；P28/32/36三个f32=请求v
 
 `min, max, max_velocity, max_acceleration, max_jerk, MIT_kp, MIT_kd, torque_ff_nm, finish_threshold, stationary_rpm`。
 
-位置/动态/finish用本设备单位及相应时间单位；最后stationary始终rpm。伸缩min/max为IEEE NaN，表示“无软件行程限位”，不是无限协议编码能力；其他值仍须正常解析。返回已应用配置，不是尚未提交的编辑字段。默认伸缩速度/加速度/jerk约6.28333/12.56667/62.83333（mm时间单位），finish0.1885mm；关节10/20/100（deg时间单位），finish0.3deg。MIT kp5、kd0.5、ff0；stationary伸缩1.1rpm、关节0.1rpm。
+位置/动态/finish用本设备单位及时间单位；stationary始终rpm。伸缩min/max为NaN表示无软件行程区间，不代表无限编码能力。返回已应用配置：伸缩轨迹6.28333/12.56667/62.83333（mm时间单位），finish0.1885mm，MIT20/0.5/0；关节轨迹570/1080/3500（deg时间单位），finish0.3deg，MIT保留已有用户增益；stationary伸缩1.1rpm、关节0.1rpm。启动值以config.hpp为准，运行态以实际回读为准。
 
 **M2006，长度50**：P0 result，P2起连续十二个f32：
 
 `velocity_Kp, velocity_Ki, velocity_Kd, velocity_output_max, position_Kp, position_Kd, position_output_max, profile_max_spd, profile_max_acc, profile_max_jerk, finish_deg, stationary_rpm`。
 
-当前值9/.1/0/8000、5/4000/400、1800/1200/3000、.5/.1。离散PID/PD按已确认周期使用，不额外乘除dt。8000是C610协议指令约8A转矩电流，不是电源输入电流或安全保证。本版只查询，不在线修改这些构造参数。
+当前快速响应试调值18/.1/0/8000、30/200/400、1800/7200/40000、.5/.1。原库360°参考曲线约0.6604s，不等于实板已验证一秒到位；电流限幅和到位阈值未放宽。离散PID/PD不额外乘除dt。8000为约8A转矩电流指令，不是电源输入电流或安全保证；串口只查询，不在线修改构造参数。
 
 **底盘，长度30**：P0 result，P2起七个f32：`max_vx=.1, max_vy=.1, max_wz=10, max_wheel_rpm=30, wheel_radius_mm=63.5, wheel_distance_x_mm=435, wheel_distance_y_mm=435`。
 
