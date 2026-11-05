@@ -7,14 +7,14 @@
 #include <atomic>
 namespace host
 {
-// Single task owns parsing/dispatch/replies. Hardware timers keep device control.
+// 解析、分派和回复由单个任务负责。设备控制仍由硬件定时器负责。
 class Control final
 {
 public:
     Control(Uart& uart,device::DMPositionTest* const* dm,device::DMOmniChassis& chassis,
             device::M2006Position* const (&dji)[2]):uart_(uart),dm_(dm),chassis_(chassis),dji_(dji){}
     void poll(std::uint32_t now_ms);
-    void linkTick(std::uint32_t now_ms); // TIM3 500Hz, also called by task.
+    void linkTick(std::uint32_t now_ms); // TIM3 500Hz 调用，任务中也会调用。
     bool timedOut() const noexcept{return timed_out_.load(std::memory_order_acquire);}
     std::uint32_t crcErrors() const noexcept{return parser_.crc_errors();}
 private:

@@ -6,8 +6,8 @@ namespace device
 {
 namespace
 {
-// Worst-case tangential speed envelope, not a second wheel-speed solver.
-// All accepted vx/vy/wz combinations fit the user-confirmed30rpm wheel cap.
+// 最坏情况下的切向速度包络，并非第二套轮速求解器。
+// 所有可接受的 vx/vy/wz 组合均满足用户确认的 30rpm 轮速上限。
 static_assert((DMOmniChassis::MaxVx+DMOmniChassis::MaxVy)*0.707106782f+
               0.435f*0.707106782f*DMOmniChassis::MaxWz*3.141592654f/180.0f <
               DMOmniChassis::MaxWheelRpm*2.0f*3.141592654f*0.0635f/60.0f);
@@ -30,7 +30,7 @@ DMOmniChassis::DMOmniChassis(bsp::can::Can& can,const Config& cfg):
     motion_({.wheel_radius=WheelRadiusMm,.wheel_distance_x=WheelDistanceXmm,.wheel_distance_y=WheelDistanceYmm,
              .wheel_front_right=&wheel_control_[0],.wheel_front_left=&wheel_control_[1],
              .wheel_rear_left=&wheel_control_[2],.wheel_rear_right=&wheel_control_[3]}),
-    location_(motion_),control_(motion_,location_,{}) // No posture/trajectory API is exposed.
+    location_(motion_),control_(motion_,location_,{}) // 不暴露姿态/轨迹 API。
 {
 }
 DMOmniChassis::Startup DMOmniChassis::start()
@@ -67,8 +67,8 @@ DMOmniChassis::Result DMOmniChassis::enable()
                 return Result::Busy;
         command_active_=true;
     }
-    // Library acquires its mutex only in task context. It sends the four enable
-    // requests here; normal references and every disable request stay in update().
+    // 库仅在任务上下文中获取互斥锁。此处发送四个使能
+    // 请求；常规参考值及所有失能请求仍在 update() 中发送。
     const bool accepted=control_.enable();
     control_.hold();
     ISRGuard guard;
@@ -82,7 +82,7 @@ DMOmniChassis::Result DMOmniChassis::disable()
     ISRGuard guard;
     if(command_active_)return Result::Busy;
     running_=pending_=false;target_={};
-    control_.disable(); // Releases software control; explicit disable frames are deferred to update().
+    control_.disable(); // 释放软件控制；显式失能帧延后至 update() 发送。
     return result_=Result::Ok;
 }
 DMOmniChassis::Result DMOmniChassis::setVelocity(chassis::Velocity target)
@@ -98,7 +98,7 @@ DMOmniChassis::Result DMOmniChassis::setVelocity(chassis::Velocity target)
             return Result::OutsideLimits;
         command_active_=true;
     }
-    control_.setVelocityInBody(target,false); // Actual library kinematics runs at the next500Hz tick.
+    control_.setVelocityInBody(target,false); // 库的实际运动学计算在下一个 500Hz 周期执行。
     ISRGuard guard;
     command_active_=false;
     if(link_blocked_||!connected()||!running_||fault_)
@@ -140,7 +140,7 @@ bool DMOmniChassis::update()
     if(running_&&!fault_)
     {
         location_.update(0.002f);
-        control_.controllerUpdate(); // setRef sends once/wheel; do NOT also call motion_.update().
+        control_.controllerUpdate(); // setRef 每轮发送一次；绝不能再调用 motion_.update()。
     }
     else
     {

@@ -12,21 +12,21 @@
 #include "watchdog.hpp"
 
 bsp::can::Can* dm_can = nullptr;
-device::DMPositionTest* dm_motors[6]{}; // Order/IDs and control values: config.hpp.
+device::DMPositionTest* dm_motors[6]{}; // 顺序、ID 和控制参数见 config.hpp。
 
 bsp::can::Can* chassis_can = nullptr;
 device::DMOmniChassis* dm_chassis = nullptr;
 device::DMOmniChassis::Feedback chassis_feedback{};
 volatile device::DMOmniChassis::Startup chassis_startup{device::DMOmniChassis::Startup::NotStarted};
-volatile bool chassis_poll_ok{false}; // Hardware submission only, not physical disable confirmation.
+volatile bool chassis_poll_ok{false}; // 仅表示硬件提交，不代表已确认物理失能。
 
 bsp::can::Can* m2006_can = nullptr;
-device::M2006Position* m2006_motors[2]{}; // Independent permanent objects, like dm_motors.
+device::M2006Position* m2006_motors[2]{}; // 与 dm_motors 一样，均为独立的常驻对象。
 volatile std::uint32_t m2006_tx_failures{0};
 
-// Device parameters live in config.hpp. Startup only constructs objects and starts
-// already-configured peripherals; no automatic enable or hardware parameter writes.
-// Operation/safety procedure and serial protocol are documented in README.md.
+// 设备参数位于 config.hpp。启动过程只构造对象并启动
+// 已配置的外设；不会自动使能或写入硬件参数。
+// 操作、安全流程及串口协议见 README.md。
 
 enum class Startup : std::uint32_t
 {
@@ -35,13 +35,13 @@ enum class Startup : std::uint32_t
 };
 volatile Startup dm_startup{Startup::NotStarted};
 volatile std::uint32_t dm_rx_frames{0};
-volatile std::uint32_t dm_tx_submitted_frames{0}; // Hardware submission, not motor execution.
+volatile std::uint32_t dm_tx_submitted_frames{0}; // 表示硬件提交，不代表电机执行。
 volatile std::uint32_t dm_tx_failures{0};
 volatile bool host_link_timeout{false};
 volatile std::uint32_t host_crc_errors{0}, host_rx_dropped_bytes{0}, host_uart_errors{0}, host_tx_errors{0};
 
-// Existing fixed-storage package performs explicit placement new. Objects are
-// permanent and never allocate from the project's small C/C++ heap or an ISR.
+// 现有固定存储包显式执行 placement new。对象常驻，
+// 不会从工程的小容量 C/C++ 堆分配内存，也不会在 ISR 中分配内存。
 static memory::StaticObject<bsp::can::Can> can_storage;
 static memory::StaticObject<device::DMPositionTest> motor_storage[6];
 static MEM_RAM_AXI memory::DMABuffer<512> host_rx_dma;
@@ -69,7 +69,7 @@ static void motor_init()
             .pos_max_rad = parameters.pos_max_rad,
             .vel_max_rad = parameters.vel_max_rad_s,
             .tor_max = parameters.torque_max_nm,
-            .auto_zero = false, // Device waits for genuinely new, stationary feedback.
+            .auto_zero = false, // 设备等待真正更新且表明静止的反馈。
             .reverse = parameters.reverse,
             // reduction_rate仅表示外接减速；S3519反馈归一化仍由现有Type路径负责。
             // MIT位置参考的逆向坐标换算在设备层完成，不修改公共驱动。
@@ -109,8 +109,8 @@ static void can_receive(const bsp::can::FrameView& frame)
 
 static bool can_init()
 {
-    // Upstream DM driver owns its standard mask filter (0x028/0x7F8), covering
-    // legal replies 0x029..0x02F. Instance callbacks reject nonmatching IDs.
+    // 上游 DM 驱动负责其标准掩码过滤器（0x028/0x7F8），覆盖
+    // 合法回复 0x029..0x02F。实例回调拒绝不匹配的 ID。
     if (motors::DMMotor::CAN_FilterInit(*dm_can, 0) != bsp::can::Status::Ok ||
         dm_can->configure_filter(bsp::can::GlobalFilter{
             .reject_standard_remote = true, .reject_extended_remote = true}) != bsp::can::Status::Ok ||
@@ -126,8 +126,8 @@ static bool can_init()
         dm_startup = Startup::ReceiveCallbackFailed;
         return false;
     }
-    // FD+BRS at 5 Mbps: SSP offset follows the configured data sample point.
-    // Driver/HAL measure the TXD->RXD loop delay; no guessed transceiver delay.
+    // FD+BRS 速率为 5 Mbps：SSP 偏移遵循已配置的数据采样点。
+    // 驱动/HAL 测量 TXD->RXD 环路延迟；不猜测收发器延迟。
     const auto sample_mtq = hfdcan1.Init.DataPrescaler * (1U + hfdcan1.Init.DataTimeSeg1);
     if (dm_can->configure_tx_delay_compensation({true, sample_mtq, 0}) != bsp::can::Status::Ok)
     {
@@ -147,25 +147,25 @@ static void motorProfileUpdate(TIM_HandleTypeDef*) // TIM7, 100 Hz.
     for (auto* motor : dm_motors)
         motor->profileUpdate();
     for (auto* motor : m2006_motors)
-        motor->profileUpdate(); // TIM7 100Hz: each independent trajectory/velocity feedforward.
+        motor->profileUpdate(); // TIM7 100Hz：各自独立的轨迹/速度前馈。
 }
 
 static void motorFeedbackUpdate(TIM_HandleTypeDef*) // TIM3, 500 Hz.
 {
-    // One owner: default watchdog budget 10 ticks -> approximately 20 ms here.
+    // 唯一负责方：默认看门狗预算为 10 个节拍，此处约为 20 ms。
     service::Watchdog::EatAll();
-    host_control->linkTick(HAL_GetTick()); // Host 500ms timeout does not wait for the task.
+    host_control->linkTick(HAL_GetTick()); // 上位机 500ms 超时处理无需等待任务。
     for (auto* motor : dm_motors)
         motor->feedbackUpdate();
-    chassis_poll_ok = dm_chassis->update(); // FDCAN2 periodic velocity/disable owner,500Hz.
+    chassis_poll_ok = dm_chassis->update(); // FDCAN2 周期速度/失能的唯一负责方，500Hz。
     for (auto* motor : m2006_motors)
-        motor->positionUpdate(); // TIM3 500Hz: each independent position PD.
+        motor->positionUpdate(); // TIM3 500Hz：各自独立的位置 PD。
 }
 
-static void motorMitSendUpdate(TIM_HandleTypeDef*) // TIM6, 2 kHz; each motor 1 kHz.
+static void motorMitSendUpdate(TIM_HandleTypeDef*) // TIM6，2 kHz；每台电机 1 kHz。
 {
-    // Unique TX owner: A=[0,1,2] (0A/0B/0C), B=[3,4,5] (0D/0E/0F).
-    // Alternating hardware ticks separate submissions by 0.5 ms without busy-waits.
+    // 唯一发送方：A=[0,1,2] (0A/0B/0C)，B=[3,4,5] (0D/0E/0F)。
+    // 交替使用硬件节拍，使两组提交间隔为 0.5 ms，无需忙等待。
     static unsigned next_group = 0;
     const unsigned first = next_group * 3U;
     next_group ^= 1U;
@@ -183,7 +183,7 @@ static void motorMitSendUpdate(TIM_HandleTypeDef*) // TIM6, 2 kHz; each motor 1 
     const auto traffic = dm_can->counters();
     dm_rx_frames = traffic.rx_frames;
     dm_tx_submitted_frames = traffic.tx_submitted_frames;
-    if (next_group == 0) // Every second TIM6 tick: both velocity loops, one shared frame.
+    if (next_group == 0) // 每两个 TIM6 节拍：更新两个速度环，共用一帧发送。
     {
         for (auto* motor : m2006_motors)
             motor->velocityUpdate();
@@ -192,7 +192,7 @@ static void motorMitSendUpdate(TIM_HandleTypeDef*) // TIM6, 2 kHz; each motor 1 
         {
             m2006_tx_failures = m2006_tx_failures + 1;
             for (auto* motor : m2006_motors)
-                motor->transmitFailed(); // Cache zero; no immediate retry.
+                motor->transmitFailed(); // 缓存零值；不立即重试。
         }
     }
 }
@@ -220,8 +220,8 @@ static bool tim_init()
 
 static void motorCommandUpdate(void*)
 {
-    // Initialization runs on this 4096-byte task stack, not the 512-byte Init stack.
-    // Construct/register all twelve motors before starting the three buses or timers.
+    // 初始化使用本任务的 4096 字节栈，而非 Init 的 512 字节栈。
+    // 启动三条总线或定时器前，先构造并注册全部十二台电机。
     motor_init();
     chassis_can = INIT_OBJECT(chassis_can_storage, hfdcan2);
     dm_chassis = INIT_OBJECT(chassis_storage, *chassis_can, config::chassis);
@@ -258,7 +258,7 @@ static void motorCommandUpdate(void*)
     dm_startup = Startup::Ready;
     for (;;)
     {
-        host_control->poll(HAL_GetTick()); // Serial and Ozone commands share one consumer.
+        host_control->poll(HAL_GetTick()); // 串口和 Ozone 命令共用一个消费者。
         host_link_timeout = host_control->timedOut();
         host_crc_errors = host_control->crcErrors();
         host_rx_dropped_bytes = host_uart->rxDrops();
@@ -267,7 +267,7 @@ static void motorCommandUpdate(void*)
         chassis_feedback = dm_chassis->feedback();
         for (auto* motor : m2006_motors)
             motor->service();
-        osDelay(1); // Protocol service only; motor timing remains hardware-driven.
+        osDelay(1); // 仅服务协议；电机定时仍由硬件驱动。
     }
 }
 

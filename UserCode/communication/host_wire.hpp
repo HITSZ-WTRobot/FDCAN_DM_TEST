@@ -24,11 +24,11 @@ enum class WireResult : std::uint16_t
     BadVersion=100, BadType=101, BadLength=102, BadPadding=103,
     UnknownOpcode=104, UnknownMotor=105, SequenceConflict=106, LinkFault=107
 };
-// All multi-byte fields little-endian. CRC16/CCITT-FALSE covers bytes 0..61.
-// 0:A5 1:5A 2:version=2 3:type=0 request/1 response 4..5:sequence
-// 6:opcode 7:logical device ID or FF (not necessarily a CAN ID)
-// 8..9:payload length 10..11:reserved=0
-// 12..61:payload and zero padding 62..63:CRC little-endian.
+// 所有多字节字段均为小端序。CRC16/CCITT-FALSE 覆盖字节 0..61。
+// 0:A5 1:5A 2:version=2 3:type=0 请求/1 响应 4..5:sequence（序号）
+// 6:opcode（操作码）7:逻辑设备 ID 或 FF（不一定是 CAN ID）
+// 8..9:payload length（载荷长度）10..11:reserved=0（保留字段）
+// 12..61:payload（载荷）及零填充 62..63:CRC，小端序。
 std::uint16_t get16(const std::uint8_t* p) noexcept;
 std::uint32_t get32(const std::uint8_t* p) noexcept;
 float getFloat(const std::uint8_t* p) noexcept;
@@ -39,8 +39,8 @@ std::uint16_t checksum(std::span<const std::uint8_t> bytes) noexcept;
 Frame response(const Frame& request, std::uint8_t motor, std::uint16_t result) noexcept;
 void finish(Frame& frame, std::uint16_t payload_length) noexcept;
 
-// Sliding parser: CRC mismatch discards one byte, not a complete presumed frame.
-// Partial/gapped frames never execute commands; no assumption about DMA/idle boundaries.
+// 滑动解析器：CRC 不匹配时只丢弃一个字节，而非整个推定帧。
+// 不完整或有间隙的帧绝不执行命令；不假设 DMA/空闲事件边界与帧边界一致。
 class Parser
 {
 public:
@@ -52,4 +52,4 @@ private:
     std::size_t used_{};
     std::uint32_t crc_errors_{};
 };
-} // namespace host
+} // 命名空间 host

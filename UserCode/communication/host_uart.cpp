@@ -13,9 +13,9 @@ bool Uart::start()
         handle_.hdmarx->Init.Mode != DMA_CIRCULAR || handle_.hdmatx->Init.Mode != DMA_NORMAL)
         return false;
     owner_=this;
-    // Custom sections are NOLOAD: initialize DMA storage explicitly before first use.
+    // 自定义段为 NOLOAD：首次使用前显式初始化 DMA 存储区。
     std::memset(rx_.data(),0,rx_.size());std::memset(tx_.data(),0,tx_.size());
-    __DMB(); // Publish initialization before enabling DMA on noncached AXI RAM.
+    __DMB(); // 在禁用缓存的 AXI RAM 上启用 DMA 前，发布初始化结果。
     if (HAL_UART_RegisterRxEventCallback(&handle_,receive)!=HAL_OK ||
         HAL_UART_RegisterCallback(&handle_,HAL_UART_TX_COMPLETE_CB_ID,transmitted)!=HAL_OK ||
         HAL_UART_RegisterCallback(&handle_,HAL_UART_ERROR_CB_ID,error)!=HAL_OK)
@@ -31,10 +31,10 @@ void Uart::receive(UART_HandleTypeDef* h,std::uint16_t)
 
 void Uart::receiveRange()
 {
-    // Read live DMA position, not an older pending HT/TC/IDLE event's Size.
-    // HT/TC stay enabled: continuous traffic is serviced at least every half-buffer.
+    // 读取 DMA 的实时位置，而非较早挂起的 HT/TC/IDLE 事件中的 Size。
+    // HT/TC 保持启用：连续传输时至少每半个缓冲区处理一次。
     const auto remaining=__HAL_DMA_GET_COUNTER(handle_.hdmarx);
-    __DMB(); // Observe DMA-written bytes after sampling its completed position.
+    __DMB(); // 采样 DMA 已完成的位置后，读取 DMA 写入的字节。
     const auto position=static_cast<std::uint16_t>((rx_.size()-remaining)%rx_.size());
     auto write=write_.load(std::memory_order_relaxed);
     const auto read=read_.load(std::memory_order_acquire);
@@ -83,7 +83,7 @@ void Uart::error(UART_HandleTypeDef* h)
 
 void Uart::service()
 {
-    // Abort/restart only the already configured transport, in task context.
+    // 仅在任务上下文中中止/重启已配置的传输。
     if(rx_error_.load())
     {
         if(HAL_UART_AbortReceive(&handle_)==HAL_OK)
@@ -102,7 +102,7 @@ void Uart::service()
     if(discontinuity_.load())
     {
         ISRGuard guard;
-        read_.store(write_.load()); // Discard ambiguous pre/post-gap bytes as one boundary.
+        read_.store(write_.load()); // 将中断间隙前后归属不明的字节一并丢弃，建立统一边界。
     }
 }
 
@@ -110,7 +110,7 @@ bool Uart::send(const Frame& frame)
 {
     if(tx_busy_.load(std::memory_order_acquire) || tx_error_.load())return false;
     std::memcpy(tx_.data(),frame.data(),frame.size());
-    __DMB(); // Publish the full immutable frame before DMA can read it.
+    __DMB(); // 在 DMA 可读取前，发布完整且内容保持不变的帧。
     tx_busy_.store(true,std::memory_order_release);
     const auto status=HAL_UART_Transmit_DMA(&handle_,tx_.data(),frame.size());
     if(status==HAL_OK)return true;
@@ -118,4 +118,4 @@ bool Uart::send(const Frame& frame)
     if(status!=HAL_BUSY)tx_errors_.fetch_add(1,std::memory_order_relaxed);
     return false;
 }
-} // namespace host
+} // 命名空间 host

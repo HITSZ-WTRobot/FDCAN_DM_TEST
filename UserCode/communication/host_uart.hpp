@@ -7,9 +7,9 @@
 
 namespace host
 {
-// One owner per UART. DMA storage must live in noncached, DMA-accessible AXI RAM.
-// RX ISR copies completed ranges into an SPSC byte ring; parsing is task-only.
-// TX uses one immutable DMA buffer until completion or confirmed abort.
+// 每个 UART 只有一个负责对象。DMA 存储区必须位于禁用缓存且 DMA 可访问的 AXI RAM。
+// 接收 ISR 将已完成区间复制到 SPSC 字节环形缓冲区；解析仅在任务中进行。
+// 发送使用单个 DMA 缓冲区，完成或确认中止前保持内容不变。
 class Uart final
 {
 public:
@@ -37,7 +37,7 @@ private:
     std::atomic<std::uint32_t> write_{0}, read_{0};
     std::atomic<bool> tx_busy_{false}, rx_error_{false}, tx_error_{false}, discontinuity_{false};
     std::atomic<std::uint32_t> rx_drops_{0}, uart_errors_{0}, tx_errors_{0};
-    std::uint16_t dma_position_{0}; // Only RX events, or task with IRQ excluded.
+    std::uint16_t dma_position_{0}; // 仅由接收事件或已屏蔽 IRQ 的任务访问。
     bool started_{false};
 };
-} // namespace host
+} // 命名空间 host

@@ -8,8 +8,8 @@
 
 namespace device
 {
-// Permanent FDCAN2 assembly. Body velocity only: real library Master/Omni4,
-// no application kinematics or world-position command path.
+// 常驻 FDCAN2 设备组装。仅提供机体速度控制：实际使用库中的 Master/Omni4，
+// 不在应用层实现运动学，也不提供世界坐标位置命令路径。
 class DMOmniChassis final
 {
 public:
@@ -37,13 +37,13 @@ public:
     DMOmniChassis(const DMOmniChassis&)=delete;
     DMOmniChassis& operator=(const DMOmniChassis&)=delete;
     Startup start();
-    Result enable(); // Task only: library enable requests, fresh feedback confirms readiness.
+    Result enable(); // 仅限任务：通过库请求使能，由新反馈确认就绪。
     Result disable();
-    Result stop(); // Zero body speed, NOT a position lock or emergency stop.
+    Result stop(); // 将机体速度设零，并非位置锁定或急停。
     Result setVelocity(chassis::Velocity target);
-    bool update(); // TIM3,500Hz: unique periodic owner of all four wheel references/disable frames.
-    void linkLost(); // ISR-safe requested stop/fault only; no extra CAN burst.
-    void linkRestored() noexcept { link_blocked_=false; } // Never enables/clears fault.
+    bool update(); // TIM3，500Hz：四轮参考值/失能帧的唯一周期调度入口。
+    void linkLost(); // 可在 ISR 中安全调用，仅请求停止并锁存故障；不额外突发发送 CAN 帧。
+    void linkRestored() noexcept { link_blocked_=false; } // 绝不使能或清除故障。
     Feedback feedback();
 private:
     bool connected() const;

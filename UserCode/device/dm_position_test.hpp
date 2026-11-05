@@ -31,8 +31,8 @@ struct LinearFeedback
     float reference_velocity_mm_s;
 };
 
-// MIT packet coefficients, not MCU PID gains. Copied at construction.
-// Low-gain starting values only: no assertion of loaded mechanical stability.
+// MIT 报文系数，并非 MCU PID 增益；在构造时复制。
+// 仅为低增益初始值，不保证带载机械稳定性。
 struct ControlParameters
 {
     float kp{5.0f};
@@ -44,42 +44,42 @@ struct ControlParameters
 
 struct MotionLimits
 {
-    float min_deg{}; // Joint software interval only; ignored for linear travel.
+    float min_deg{}; // 仅用于关节软件限位区间，直线行程忽略此项。
     float max_deg{};
     float max_velocity_deg_s{};
     float max_acceleration_deg_s2{};
     float max_jerk_deg_s3{};
 };
 
-/** Project-specific six-motor test device: DMMotor + existing SCurveProfile.
- * No external position PD/velocity PID, no hidden hardware startup or heap allocation.
+/** 工程专用的六电机测试设备：DMMotor + 现有 SCurveProfile。
+ * 无外部位置 PD/速度 PID，不隐式启动硬件或分配堆内存。
  *
- * Logical positions are output-shaft degrees relative to the software zero. The
- * driver's getAngle() is never reset: zero_output_deg_ preserves its absolute origin
- * so every MIT p_des is an absolute reference in the motor's protocol coordinate.
- * Per the user's tested firmware, S3519 position feedback is pre-reduction and the
- * existing driver normalizes by 19.203. Invert that same normalization for MIT p_des;
- * do not change the library or apply the internal ratio to external reduction_rate.
- * Velocity follows the existing driver's output-shaft feedback contract; MIT v_des
- * uses deg/s, not rpm. Position and velocity thus have separate protocol scales.
+ * 逻辑位置以输出轴相对软件零点的角度表示，单位为度。
+ * 驱动的 getAngle() 从不复位：zero_output_deg_ 保留其绝对原点，
+ * 因而每个 MIT p_des 都是电机协议坐标系中的绝对参考值。
+ * 根据用户实测的固件，S3519 位置反馈为减速前数值，
+ * 现有驱动按 19.203 进行归一化。MIT p_des 需逆向应用同一归一化；
+ * 不修改库，也不将内置减速比应用于外部 reduction_rate。
+ * 速度遵循现有驱动的输出轴反馈契约；MIT v_des
+ * 使用 deg/s，而非 rpm。因此位置与速度使用不同的协议缩放比例。
  *
- * Command solving runs in the polling task, sampling in TIM7 (100 Hz), feedback and
- * status updates in TIM3 (500 Hz). TIM6 runs at 2 kHz and alternates two groups of
- * three; each motor keeps a 1 kHz TX slot. All three timers and
- * CAN RX share one non-preempting priority. Task state handoffs use short ISRGuards;
- * curve solving does not mask interrupts, and the previous reference remains valid.
+ * 命令求解在轮询任务中执行，TIM7（100 Hz）采样，
+ * TIM3（500 Hz）更新反馈和状态。TIM6 以 2 kHz 交替调度两组，
+ * 每组三台电机；每台电机保留 1 kHz 的发送时隙。这三个定时器与
+ * CAN 接收共用同一不可相互抢占的优先级。任务状态交接使用短时 ISRGuard；
+ * 曲线求解不屏蔽中断，期间上一参考值仍然有效。
  *
- * Joint travel is limited to +/-180 degrees about each new software zero. Linear
- * actuators have no software travel interval; finite values and absolute protocol
- * encoding bounds still apply. A new joint zero is rejected if its full interval
- * cannot be encoded. Both kinds retain validated trajectory velocity/accel/jerk.
+ * 关节行程限制为每次新软件零点两侧各 180 度。直线
+ * 执行器没有软件行程区间，但仍须满足有限数值及绝对协议
+ * 编码范围约束。若关节完整限位区间无法编码，则拒绝设置新零点。
+ * 两类设备均保留已校验的轨迹速度、加速度和加加速度约束。
  *
- * Enable first preloads a hold reference while disabled, then requests enable; only
- * fresh feedback confirms state. Faults cancel motion and request disable with no
- * auto-restart. Software limits and protocol bounds do not provide hardware safety.
- * Only the sendUpdate path submits CAN frames, at most one attempt per invocation.
- * Commands, feedback/profile faults and transmitFailed only change requested state;
- * disable is submitted in the next assigned slot, not as an out-of-band burst.
+ * 使能时先在失能状态下预装保持参考值，再请求使能；仅
+ * 新反馈可确认状态。故障会取消运动并请求失能，不
+ * 自动重启。软件限位和协议范围约束不提供硬件安全保障。
+ * 仅 sendUpdate 路径提交 CAN 帧，每次调用最多尝试一次。
+ * 命令、反馈/轨迹故障和 transmitFailed 仅改变请求状态；
+ * 失能帧在下一个分配的时隙提交，不在时隙外突发发送。
  */
 class DMPositionTest final
 {
@@ -89,31 +89,31 @@ public:
     DMPositionTest(const DMPositionTest&) = delete;
     DMPositionTest& operator=(const DMPositionTest&) = delete;
 
-    void commandUpdate();             // Shared UART/Ozone task: commands and new S-curve solving.
-    void profileUpdate();             // TIM7: sample position + velocity, dt=0.01 s.
-    void feedbackUpdate();            // TIM3: new feedback, readiness/faults/arrival.
-    void sendUpdate();                // TIM6: selected group only, one frame attempt/1 ms.
-    void transmitFailed();            // Latch fault; no immediate retry or CAN submission.
-    void feedbackReceived() noexcept; // Called after the driver's receive callback.
+    void commandUpdate();             // 共用 UART/Ozone 任务：处理命令及新 S 曲线求解。
+    void profileUpdate();             // TIM7：采样位置与速度，dt=0.01 s。
+    void feedbackUpdate();            // TIM3：新反馈、就绪状态、故障和到位判定。
+    void sendUpdate();                // TIM6：仅调度选中组，每 1 ms 尝试发送一帧。
+    void transmitFailed();            // 锁存故障，不立即重试或提交 CAN 帧。
+    void feedbackReceived() noexcept; // 在驱动接收回调之后调用。
 
-    // Shared task-side command path: reject an existing Ozone command, never overwrite it.
+    // 共用的任务侧命令路径：已有 Ozone 命令时拒绝新命令，绝不覆盖原命令。
     Result execute(Command requested, float target = 0.0f, const MotionLimits* limits = nullptr);
-    void linkLost(); // ISR-safe state request; CAN disable still uses the assigned TX slot.
-    void linkRestored() noexcept { host_link_blocked_ = false; } // No automatic enable.
+    void linkLost(); // 可在 ISR 中安全请求状态变更；CAN 失能仍使用分配的发送时隙。
+    void linkRestored() noexcept { host_link_blocked_ = false; } // 不自动使能。
     ControlParameters controlParameters() const noexcept { return control_; }
     MotionLimits activeLimits() const noexcept { return limits_; }
-    // Task-side APIs; use the same single command consumer, never call from an ISR.
-    // Commands only change state; all CAN output remains in the existing TIM6 slots.
-    static constexpr float LinearMmPerRevolution = 226.2f; // User-supplied nominal output-shaft travel.
+    // 任务侧 API；使用同一命令消费者，绝不能从 ISR 调用。
+    // 命令仅改变状态；所有 CAN 输出仍使用现有 TIM6 时隙。
+    static constexpr float LinearMmPerRevolution = 226.2f; // 用户提供的输出轴每转标称行程。
     static constexpr float LinearMmPerDegree = LinearMmPerRevolution / 360.0f;
-    Result moveToMm(float target_mm); // Absolute position relative to current software zero; linear only.
-    Result setSoftwareZero(); // Disabled + stable feedback; joint interval recenters on success.
-    std::optional<LinearFeedback> linearFeedback() const; // nullopt for joints; no heap allocation.
+    Result moveToMm(float target_mm); // 相对当前软件零点的绝对位置，仅适用于直线执行器。
+    Result setSoftwareZero(); // 须失能且反馈稳定；成功后关节限位区间以新零点为中心。
+    std::optional<LinearFeedback> linearFeedback() const; // 关节返回 nullopt，不分配堆内存。
 
     volatile Command command{Command::None};
     volatile Result result{Result::Ok};
-    volatile float target_deg{0.0f}; // Joint Move input; also retains internal angle-reference bookkeeping.
-    volatile float target_mm{0.0f}; // Linear MoveMm input; raw Move/target_deg is joint-only.
+    volatile float target_deg{0.0f}; // 关节 Move 输入，同时保留内部角度参考记录。
+    volatile float target_mm{0.0f}; // 直线 MoveMm 输入；原始 Move/target_deg 仅适用于关节。
     volatile float min_deg{0.0f};
     volatile float max_deg{0.0f};
     volatile float max_velocity_deg_s{0.0f};
@@ -180,4 +180,4 @@ private:
     float stable_min_{0.0f};
     float stable_max_{0.0f};
 };
-} // namespace device
+} // 命名空间 device

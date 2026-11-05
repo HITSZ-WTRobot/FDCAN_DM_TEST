@@ -8,12 +8,12 @@
 
 namespace device
 {
-/** One M2006/C610, using the library's output-shaft deg/rpm coordinates.
- * Construct before Can::start(); the borrowed bus and this object must be permanent.
- * Commands/service have one task consumer. Feedback and all periodic callbacks must
- * share a non-preempting IRQ priority. Short ISRGuards protect task handoffs and
- * snapshots; command_active_ gates trajectory access while task-side solving/reset
- * runs with interrupts enabled. No method submits a CAN frame or feeds watchdogs.
+/** 单台 M2006/C610，使用库的输出轴 deg/rpm 坐标。
+ * 在 Can::start() 前构造；借用的总线和本对象必须常驻。
+ * 命令/service 由单个任务消费。反馈与所有周期回调必须
+ * 共用同一不可相互抢占的 IRQ 优先级。短时 ISRGuard 保护任务交接及
+ * 快照；任务侧求解/复位期间保持中断开启，command_active_ 用于阻止
+ * 轨迹访问。所有方法均不提交 CAN 帧，也不喂看门狗。
  */
 class M2006Position final
 {
@@ -38,14 +38,14 @@ public:
         Result result{Result::Ok};
         bool connected{false};
         bool zeroed{false};
-        bool enabled{false}; // Software controller state, not C610 enable confirmation.
+        bool enabled{false}; // 软件控制器状态，并非 C610 使能确认。
         bool busy{false};
         bool motion_complete{false};
         bool fault{false};
         float position_deg{0.0f};
         float velocity_rpm{0.0f};
         float target_deg{0.0f};
-        // Last actual speed-PID reference: trajectory velocity FF + position PD.
+        // 最近实际使用的速度 PID 参考值：轨迹速度前馈 + 位置 PD。
         float velocity_reference_rpm{0.0f};
         std::uint32_t feedback_count{0};
     };
@@ -56,20 +56,20 @@ public:
     M2006Position(M2006Position&&) = delete;
     M2006Position& operator=(M2006Position&&) = delete;
 
-    // Task only. Stop holds position; disable releases control and caches zero current.
+    // 仅限任务。stop 保持位置；disable 释放控制并缓存零电流。
     Result enable();
     Result disable();
     Result stop();
-    Result moveToDegrees(float target_deg); // Finite, inclusive [0, 360], never clamped.
-    // Disabled + 50 fresh stable samples; explicitly clears a latched fault on success.
+    Result moveToDegrees(float target_deg); // 有限数值，含端点的 [0, 360] 区间，绝不钳位。
+    // 须失能且获得 50 个新的稳定样本；成功时显式清除锁存故障。
     Result setSoftwareZero();
-    void service(); // First boot auto-zero and deferred fault-history reset; never enables.
+    void service(); // 首次上电自动设零及延后复位故障历史；绝不使能。
 
-    void profileUpdate();             // 100 Hz: real profileUpdate(0.01f).
-    void positionUpdate();            // 500 Hz: fresh-sample observation + real errorUpdate.
-    void velocityUpdate();            // 1 kHz: real controllerUpdate; cached output only.
-    void transmitFailed();            // Latches fault; no immediate CAN submission.
-    void linkLost(); // ISR-safe latch; zero cache, no immediate CAN output.
+    void profileUpdate();             // 100 Hz：实际调用 profileUpdate(0.01f)。
+    void positionUpdate();            // 500 Hz：观察新样本并实际调用 errorUpdate。
+    void velocityUpdate();            // 1 kHz：实际调用 controllerUpdate，仅缓存输出。
+    void transmitFailed();            // 锁存故障，不立即提交 CAN 帧。
+    void linkLost(); // 可在 ISR 中安全锁存故障；将缓存置零，不立即输出 CAN 帧。
     void linkRestored() noexcept { host_blocked_=false; }
     Config controlParameters() const noexcept { return config_; }
     [[nodiscard]] Feedback feedback() const;
@@ -82,10 +82,10 @@ private:
     [[nodiscard]] bool inBounds(float position) const;
     [[nodiscard]] bool stableNow() const;
     void resetStability();
-    void observeConnection(); // Caller owns IRQ context or ISRGuard.
+    void observeConnection(); // 调用方须处于 IRQ 上下文或持有 ISRGuard。
     void latchFault(Result reason, bool invalidate_zero = false);
     Result recordResult(Result result);
-    // Task only, with command_active_ set; construction/SCurve work stays unmasked.
+    // 仅限任务，且须设置 command_active_；构造/SCurve 计算期间不屏蔽中断。
     void rebuildTrajectory();
 
     motors::DJIMotor motor_;
@@ -93,7 +93,7 @@ private:
     const Config config_;
     const std::uint8_t id_;
     const bool parameters_valid_;
-    const float encoder_tolerance_deg_; // Two real output encoder LSB, including 36:1.
+    const float encoder_tolerance_deg_; // 输出端实际编码器的两个 LSB，已计入 36:1 减速比。
     std::optional<Trajectory> trajectory_;
     Feedback state_{};
     volatile bool command_active_{false};
@@ -109,4 +109,4 @@ private:
     float stable_min_deg_{0.0f};
     float stable_max_deg_{0.0f};
 };
-} // namespace device
+} // 命名空间 device
