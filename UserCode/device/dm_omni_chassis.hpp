@@ -16,7 +16,8 @@ public:
     static constexpr std::size_t WheelCount = 4;
     static constexpr std::array<std::uint8_t, WheelCount> MotorIds{0x0b,0x0a,0x09,0x0c};
     static constexpr float WheelRadiusMm=63.5f, WheelDistanceXmm=435.0f, WheelDistanceYmm=435.0f;
-    static constexpr float MaxVx=0.1f, MaxVy=0.1f, MaxWz=10.0f, MaxWheelRpm=30.0f;
+    static constexpr float MaxTranslationSpeed=1.0f;
+    static constexpr float MaxVx=MaxTranslationSpeed, MaxVy=MaxTranslationSpeed, MaxWz=10.0f, MaxWheelRpm=160.0f;
     struct Config { std::array<bool,WheelCount> reverse{}; };
     enum class Startup : std::uint32_t {NotStarted,Ready,FilterFailed,DelayCompensationFailed,CanStartFailed};
     enum class Result : std::uint16_t {Ok,Offline,NotEnabled,Busy,OutsideLimits,Fault,LinkFault,TransmitFailed};

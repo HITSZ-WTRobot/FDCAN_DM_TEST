@@ -6,9 +6,9 @@ namespace device
 {
 namespace
 {
-// 最坏情况下的切向速度包络，并非第二套轮速求解器。
-// 所有可接受的 vx/vy/wz 组合均满足用户确认的 30rpm 轮速上限。
-static_assert((DMOmniChassis::MaxVx+DMOmniChassis::MaxVy)*0.707106782f+
+// 合成平移速度限制为1m/s；任意方向叠加10deg/s旋转的轮速包络小于160rpm。
+// 这里只核对包络，轮速分解仍使用原Omni4库，不另外实现运动学。
+static_assert(DMOmniChassis::MaxTranslationSpeed+
               0.435f*0.707106782f*DMOmniChassis::MaxWz*3.141592654f/180.0f <
               DMOmniChassis::MaxWheelRpm*2.0f*3.141592654f*0.0635f/60.0f);
 motors::DMMotor::Config motorConfig(bsp::can::Can& can,std::size_t i,const DMOmniChassis::Config& config)
@@ -94,7 +94,8 @@ DMOmniChassis::Result DMOmniChassis::setVelocity(chassis::Velocity target)
         if(!connected())return Result::Offline;
         if(!running_||fault_)return Result::NotEnabled;
         if(!std::isfinite(target.vx)||!std::isfinite(target.vy)||!std::isfinite(target.wz)||
-           std::fabs(target.vx)>MaxVx||std::fabs(target.vy)>MaxVy||std::fabs(target.wz)>MaxWz)
+           std::fabs(target.vx)>MaxVx||std::fabs(target.vy)>MaxVy||std::fabs(target.wz)>MaxWz||
+           std::hypot(target.vx,target.vy)>MaxTranslationSpeed+1.0e-6f)
             return Result::OutsideLimits;
         command_active_=true;
     }
