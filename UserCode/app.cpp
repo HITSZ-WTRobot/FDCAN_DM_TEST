@@ -26,7 +26,7 @@ volatile std::uint32_t m2006_tx_failures{0};
 
 // 设备参数位于 config.hpp。启动过程只构造对象并启动
 // 已配置的外设；不会自动使能或写入硬件参数。
-// 操作、安全流程及串口协议见 README.md。
+// 操作、安全流程及串口协议见 doc/OPERATION.md 和 doc/SERIAL_PROTOCOL.md。
 
 enum class Startup : std::uint32_t
 {

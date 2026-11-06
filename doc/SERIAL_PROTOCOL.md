@@ -169,7 +169,7 @@ P16/20/24三个f32=实际vx m/s、vy m/s、wz deg/s；P28/32/36三个f32=请求v
 
 `min, max, max_velocity, max_acceleration, max_jerk, MIT_kp, MIT_kd, torque_ff_nm, finish_threshold, stationary_rpm`。
 
-位置/动态/finish用本设备单位及时间单位；stationary始终rpm。伸缩min/max为NaN表示无软件行程区间，不代表无限编码能力。返回已应用配置：伸缩轨迹6.28333/12.56667/62.83333（mm时间单位），finish0.1885mm，MIT20/0.5/0；关节轨迹570/1080/3500（deg时间单位），finish0.3deg，MIT保留已有用户增益；stationary伸缩1.1rpm、关节0.1rpm。启动值以config.hpp为准，运行态以实际回读为准。
+位置/动态/finish用本设备单位及时间单位；stationary始终rpm。伸缩min/max为NaN表示无软件行程区间，不代表无限编码能力。返回已应用配置：伸缩轨迹6.28333/12.56667/62.83333（mm时间单位），finish0.1885mm，MIT20/0.5/0；关节轨迹570/1080/3500（deg时间单位），finish0.3deg，左前关节MIT50/0.5/0、右前关节MIT300/5/0；stationary伸缩1.1rpm、关节0.1rpm。启动值以config.hpp为准，运行态以实际回读为准。
 
 **M2006，长度26**：P0 result；P2起连续六个f32：
 
@@ -277,7 +277,7 @@ disable_all = encode(8, 0x21, 0xff)
 
 示例只构造字节，不应在连接/重连时自动发送运动请求。客户端先Heartbeat、Info（含新kind5）、State(FF)、Parameters和Wheels确认条件，再由操作者明确Enable并发Move或MotorVelocity。不同kind按自己的单位和长度解析；不能向M2006发旧角度目标。
 
-本轮验证证据见README对应章节；真实USB-UART、前端显示、电机端模式/编号、轮向及带载效果尚须后续实板联调，不由主机模拟或编译结果替代。
+验证证据见 [设备、硬件与执行参数](DEVICES.md) 的各设备验证章节及[安全与验证边界](OPERATION.md#安全与验证边界)；真实USB-UART、前端显示、电机端模式/编号、轮向及带载效果尚须后续实板联调，不由主机模拟或编译结果替代。
 
 ## 12. 独立CRC核对向量
 
