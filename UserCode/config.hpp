@@ -2,7 +2,7 @@
 
 #include "device/dm_omni_chassis.hpp"
 #include "device/dm_position_test.hpp"
-#include "device/m2006_position.hpp"
+#include "device/m2006_velocity.hpp"
 #include <array>
 #include <cstdint>
 
@@ -61,12 +61,14 @@ inline constexpr std::array<M2006MotorParameters, 2> m2006_motor_parameters{{
     {1, false, 1.0f},
     {2, false, 1.0f}
 }};
-// 360° 一秒到位目标的试调值：参考曲线约0.6604s，实际带载到位仍须验证。
+// 输出轴直接速度 PID；接受正反向目标，限幅 ±300 rpm，不做速度规划。
 // 8000 个 C610 协议单位 = 8A 转矩电流指令，并非电源输入电流。
-inline device::M2006Position::Config m2006_control[2]{
-    {.velocity_pid={18.0f,0.1f,0.0f,8000.0f}, .position_pd={30.0f,200.0f,400.0f},
-     .profile={1800.0f,7200.0f,40000.0f}, .finish_deg=0.5f, .stationary_rpm=0.1f},
-    {.velocity_pid={18.0f,0.1f,0.0f,8000.0f}, .position_pd={30.0f,200.0f,400.0f},
-     .profile={1800.0f,7200.0f,40000.0f}, .finish_deg=0.5f, .stationary_rpm=0.1f}
+inline device::M2006Velocity::Config m2006_control[2]{
+    { .velocity_pid   = { 18.0f, 0.1f, 0.0f, 8000.0f },
+      .max_rpm        = 300.0f,
+      .stationary_rpm = 0.1f },
+    { .velocity_pid   = { 18.0f, 0.1f, 0.0f, 8000.0f },
+      .max_rpm        = 300.0f,
+      .stationary_rpm = 0.1f }
 };
 } // 命名空间 config

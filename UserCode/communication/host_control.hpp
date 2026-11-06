@@ -2,7 +2,7 @@
 #include "communication/host_uart.hpp"
 #include "device/dm_position_test.hpp"
 #include "device/dm_omni_chassis.hpp"
-#include "device/m2006_position.hpp"
+#include "device/m2006_velocity.hpp"
 #include <array>
 #include <atomic>
 namespace host
@@ -12,7 +12,7 @@ class Control final
 {
 public:
     Control(Uart& uart,device::DMPositionTest* const* dm,device::DMOmniChassis& chassis,
-            device::M2006Position* const (&dji)[2]):uart_(uart),dm_(dm),chassis_(chassis),dji_(dji){}
+            device::M2006Velocity* const (&dji)[2]):uart_(uart),dm_(dm),chassis_(chassis),dji_(dji){}
     void poll(std::uint32_t now_ms);
     void linkTick(std::uint32_t now_ms); // TIM3 500Hz 调用，任务中也会调用。
     bool timedOut() const noexcept{return timed_out_.load(std::memory_order_acquire);}
@@ -30,7 +30,7 @@ private:
     Uart& uart_;
     device::DMPositionTest* const* dm_;
     device::DMOmniChassis& chassis_;
-    device::M2006Position* const (&dji_)[2];
+    device::M2006Velocity* const (&dji_)[2];
     Parser parser_{};
     std::atomic<bool> seen_{false},timed_out_{false};
     std::atomic<std::uint32_t> last_valid_{0};

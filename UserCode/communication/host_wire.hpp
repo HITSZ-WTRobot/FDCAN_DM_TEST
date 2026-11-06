@@ -17,7 +17,7 @@ enum class Opcode : std::uint8_t
 {
     Heartbeat=0x01, Info=0x02, State=0x10, Parameters=0x11, Wheels=0x12,
     Enable=0x20, Disable=0x21, Stop=0x22, SetZero=0x23, Move=0x24, SetLimits=0x25,
-    BodyVelocity=0x26
+    BodyVelocity=0x26, MotorVelocity=0x28
 };
 enum class WireResult : std::uint16_t
 {
