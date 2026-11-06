@@ -93,7 +93,7 @@ DM关节每次软件零点建立后为−180～+180deg。M2006目标改为减速
 - **SetZero**：仅六台DM在连接、失能、静止稳定时接受，保留首次自动归零。关节重新建立新原点两侧各180°，伸缩只改变毫米原点；不写电机零点寄存器或Flash、不自动使能。新关节完整范围无法编码则拒绝并保留旧配置。M2006不支持设零。
 - **Move**：有限且满足工作/协议范围，已使能、连接有效、无fault。运动忙返回Busy，保留旧曲线/目标；规划失败也不替换旧轨迹。MM转换和轨迹执行使用已有设备API，不在通信层另建曲线或PID。
 - **SetLimits**：失能状态提交；非法值保留已应用配置。伸缩仅调整轨迹动态参数，没有min/max行程字段；关节范围必须在−180～+180°以内且完整可编码。重设关节零点后重新采用完整±180°。仅RAM生效。
-- **BodyVelocity**：x向前、y向左、wz逆时针为正。合成平移hypot(vx,vy)≤1m/s、|wz|≤10deg/s；vx/vy各字段上限1，单轮速度包络160rpm。非法、非有限或合成超限拒绝且保留旧目标，不缩放，1e-6仅为float32量化容差。Parameters布局不变，返回max_vx=1/max_vy=1/max_wz=10/max_wheel_rpm=160；旧上位机须读取新上限。轮向和提速必须先安全验证。
+- **BodyVelocity**：x向前、y向左、wz逆时针为正。合成平移hypot(vx,vy)≤1m/s、|wz|≤360deg/s；vx/vy各字段上限1，保守单轮包络360rpm。运行时同时检查 `hypot(vx,vy)+hypot(0.435,0.435)/2×|wz|×π/180≤360×2π×0.0635/60`，1e-6m/s仅为float32量化容差。非法、非有限或超包络返回OutsideLimits（6）且保留旧目标，不缩放。0.4m/s+360deg/s可接受，1m/s+360deg/s拒绝；方向无关包络可能比实际某方向轮速更保守。Parameters布局不变，返回max_vx=1/max_vy=1/max_wz=360/max_wheel_rpm=360；上位机须查询能力，旧10deg/s/160rpm固件不允许启动新版手柄遥控。轮向和提速仍须安全验证。
 - **MotorVelocity**：仅M2006。已使能、连接有效、无故障/主机门禁时，有限且绝对值不超过查询max_rpm的目标直接交给速度PID，可在旋转中更新或换向，不因持续运行返回位置Busy；非法值拒绝且保留旧目标。没有位置终点、加减速规划或motion_complete判据。Stop为0rpm，Disable为取消授权/零电流；两者语义不同。
 
 ## 6. Heartbeat / Info
@@ -177,7 +177,7 @@ P16/20/24三个f32=实际vx m/s、vy m/s、wz deg/s；P28/32/36三个f32=请求v
 
 默认18/.1/0/8000、300/.1。PID离散增益不额外乘除dt，输出上限8000为约8A转矩电流指令，不是电源输入电流或机械安全保证。位置PD、轨迹和finish字段已移除；旧50B参数包不能按新布局解码。串口只查询配置，不在线改PID。
 
-**底盘，长度30**：P0 result，P2起七个f32：`max_vx=1, max_vy=1, max_wz=10, max_wheel_rpm=160, wheel_radius_mm=63.5, wheel_distance_x_mm=435, wheel_distance_y_mm=435`。vx/vy还共同受hypot≤1约束，并非两个分量同时可取1。
+**底盘，长度30**：P0 result，P2起七个f32：`max_vx=1, max_vy=1, max_wz=360, max_wheel_rpm=360, wheel_radius_mm=63.5, wheel_distance_x_mm=435, wheel_distance_y_mm=435`。vx/vy共同受hypot≤1约束，平移与旋转还共同受上述360rpm保守包络约束，各字段最大值不保证能同时使用。
 
 ## 9. 统一result
 

@@ -6,11 +6,16 @@ namespace device
 {
 namespace
 {
-// 合成平移速度限制为1m/s；任意方向叠加10deg/s旋转的轮速包络小于160rpm。
-// 这里只核对包络，轮速分解仍使用原Omni4库，不另外实现运动学。
-static_assert(DMOmniChassis::MaxTranslationSpeed+
-              0.435f*0.707106782f*DMOmniChassis::MaxWz*3.141592654f/180.0f <
-              DMOmniChassis::MaxWheelRpm*2.0f*3.141592654f*0.0635f/60.0f);
+constexpr float DegToRad=3.141592654f/180.0f;
+constexpr float HalfDiagonalSquaredM2=(DMOmniChassis::WheelDistanceXmm*DMOmniChassis::WheelDistanceXmm+
+                                      DMOmniChassis::WheelDistanceYmm*DMOmniChassis::WheelDistanceYmm)*0.00000025f;
+constexpr float MaxWheelLinearSpeed=DMOmniChassis::MaxWheelRpm*2.0f*3.141592654f*
+                                   DMOmniChassis::WheelRadiusMm*0.001f/60.0f;
+// 两个独立最大值都可达到；叠加是否超限由 setVelocity 的运行时包络判断。
+// 只检查方向无关包络，实际轮速分解仍由原 Omni4 库完成。
+static_assert(DMOmniChassis::MaxTranslationSpeed<=MaxWheelLinearSpeed);
+static_assert(HalfDiagonalSquaredM2*(DMOmniChassis::MaxWz*DegToRad)*(DMOmniChassis::MaxWz*DegToRad)<=
+              MaxWheelLinearSpeed*MaxWheelLinearSpeed);
 motors::DMMotor::Config motorConfig(bsp::can::Can& can,std::size_t i,const DMOmniChassis::Config& config)
 {
     return {.can=can,.id0=DMOmniChassis::MotorIds[i],.type=motors::DMMotor::Type::S3519,
@@ -94,8 +99,14 @@ DMOmniChassis::Result DMOmniChassis::setVelocity(chassis::Velocity target)
         if(!connected())return Result::Offline;
         if(!running_||fault_)return Result::NotEnabled;
         if(!std::isfinite(target.vx)||!std::isfinite(target.vy)||!std::isfinite(target.wz)||
-           std::fabs(target.vx)>MaxVx||std::fabs(target.vy)>MaxVy||std::fabs(target.wz)>MaxWz||
-           std::hypot(target.vx,target.vy)>MaxTranslationSpeed+1.0e-6f)
+           std::fabs(target.vx)>MaxVx||std::fabs(target.vy)>MaxVy||std::fabs(target.wz)>MaxWz)
+            return Result::OutsideLimits;
+        const float translation=std::hypot(target.vx,target.vy);
+        const float turn_budget=MaxWheelLinearSpeed-translation+1.0e-6f;
+        const float yaw_rad_s=target.wz*DegToRad;
+        // 比较平方避免重复计算固定半对角线的平方根；1e-6m/s 仅容许 float32 舍入。
+        if(translation>MaxTranslationSpeed+1.0e-6f||turn_budget<0.0f||
+           HalfDiagonalSquaredM2*yaw_rad_s*yaw_rad_s>turn_budget*turn_budget)
             return Result::OutsideLimits;
         command_active_=true;
     }
