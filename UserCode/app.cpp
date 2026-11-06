@@ -5,7 +5,7 @@
 #include "usart.h"
 #include "device/dm_omni_chassis.hpp"
 #include "device/dm_position_test.hpp"
-#include "device/m2006_position.hpp"
+#include "device/m2006_velocity.hpp"
 #include "fdcan.h"
 #include "static_object.hpp"
 #include "tim.h"
@@ -21,12 +21,12 @@ volatile device::DMOmniChassis::Startup chassis_startup{device::DMOmniChassis::S
 volatile bool chassis_poll_ok{false}; // 仅表示硬件提交，不代表已确认物理失能。
 
 bsp::can::Can* m2006_can = nullptr;
-device::M2006Position* m2006_motors[2]{}; // 与 dm_motors 一样，均为独立的常驻对象。
+device::M2006Velocity* m2006_motors[2]{}; // 与 dm_motors 一样，均为独立的常驻对象。
 volatile std::uint32_t m2006_tx_failures{0};
 
 // 设备参数位于 config.hpp。启动过程只构造对象并启动
 // 已配置的外设；不会自动使能或写入硬件参数。
-// 操作、安全流程及串口协议见 README.md。
+// 操作、安全流程及串口协议见 doc/OPERATION.md 和 doc/SERIAL_PROTOCOL.md。
 
 enum class Startup : std::uint32_t
 {
@@ -53,7 +53,7 @@ static host::Uart* host_uart = nullptr;
 static memory::StaticObject<bsp::can::Can> chassis_can_storage;
 static memory::StaticObject<device::DMOmniChassis> chassis_storage;
 static memory::StaticObject<bsp::can::Can> m2006_can_storage;
-static memory::StaticObject<device::M2006Position> m2006_motor_storage[2];
+static memory::StaticObject<device::M2006Velocity> m2006_motor_storage[2];
 
 static void motor_init()
 {
@@ -146,8 +146,6 @@ static void motorProfileUpdate(TIM_HandleTypeDef*) // TIM7, 100 Hz.
 {
     for (auto* motor : dm_motors)
         motor->profileUpdate();
-    for (auto* motor : m2006_motors)
-        motor->profileUpdate(); // TIM7 100Hz：各自独立的轨迹/速度前馈。
 }
 
 static void motorFeedbackUpdate(TIM_HandleTypeDef*) // TIM3, 500 Hz.
@@ -159,7 +157,7 @@ static void motorFeedbackUpdate(TIM_HandleTypeDef*) // TIM3, 500 Hz.
         motor->feedbackUpdate();
     chassis_poll_ok = dm_chassis->update(); // FDCAN2 周期速度/失能的唯一负责方，500Hz。
     for (auto* motor : m2006_motors)
-        motor->positionUpdate(); // TIM3 500Hz：各自独立的位置 PD。
+        motor->feedbackUpdate(); // TIM3 500Hz：仅观察速度反馈和故障。
 }
 
 static void motorMitSendUpdate(TIM_HandleTypeDef*) // TIM6，2 kHz；每台电机 1 kHz。

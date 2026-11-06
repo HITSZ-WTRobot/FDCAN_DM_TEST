@@ -16,7 +16,8 @@ public:
     static constexpr std::size_t WheelCount = 4;
     static constexpr std::array<std::uint8_t, WheelCount> MotorIds{0x0b,0x0a,0x09,0x0c};
     static constexpr float WheelRadiusMm=63.5f, WheelDistanceXmm=435.0f, WheelDistanceYmm=435.0f;
-    static constexpr float MaxVx=0.1f, MaxVy=0.1f, MaxWz=10.0f, MaxWheelRpm=30.0f;
+    static constexpr float MaxTranslationSpeed=1.0f;
+    static constexpr float MaxVx=MaxTranslationSpeed, MaxVy=MaxTranslationSpeed, MaxWz=360.0f, MaxWheelRpm=360.0f;
     struct Config { std::array<bool,WheelCount> reverse{}; };
     enum class Startup : std::uint32_t {NotStarted,Ready,FilterFailed,DelayCompensationFailed,CanStartFailed};
     enum class Result : std::uint16_t {Ok,Offline,NotEnabled,Busy,OutsideLimits,Fault,LinkFault,TransmitFailed};
@@ -40,6 +41,9 @@ public:
     Result enable(); // 仅限任务：通过库请求使能，由新反馈确认就绪。
     Result disable();
     Result stop(); // 将机体速度设零，并非位置锁定或急停。
+    /// 机体系 m/s、deg/s；合成平移≤1、|wz|≤360、保守轮速包络≤360rpm。
+    /// 平移与转动组合超限返回 OutsideLimits 并保留旧目标，不缩放。
+    /// 0.4m/s+360deg/s 可接受；1m/s+360deg/s 不可接受。
     Result setVelocity(chassis::Velocity target);
     bool update(); // TIM3，500Hz：四轮参考值/失能帧的唯一周期调度入口。
     void linkLost(); // 可在 ISR 中安全调用，仅请求停止并锁存故障；不额外突发发送 CAN 帧。

@@ -16,12 +16,12 @@ std::uint16_t code(device::Result r)
     case R::PlanningFailed:return 9;case R::InvalidCommand:return 10;case R::TransmitFailed:return 11;
     case R::LinkFault:return code(WireResult::LinkFault);}return 10;
 }
-std::uint16_t code(device::M2006Position::Result r)
+std::uint16_t code(device::M2006Velocity::Result r)
 {
-    using R=device::M2006Position::Result;
-    switch(r){case R::Ok:return 0;case R::Offline:return 1;case R::NotZeroed:return 2;
+    using R=device::M2006Velocity::Result;
+    switch(r){case R::Ok:return 0;case R::Offline:return 1;
     case R::NotEnabled:return 3;case R::Busy:return 4;case R::OutsideLimits:return 6;
-    case R::NotStationary:return 7;case R::PlanningFailed:return 9;case R::Fault:return 8;
+    case R::NotStationary:return 7;case R::Fault:return 8;
     case R::InvalidParameters:return 5;case R::TransmitFailed:return 11;
     case R::LinkFault:return code(WireResult::LinkFault);}return 10;
 }
@@ -32,7 +32,7 @@ std::uint16_t code(device::DMOmniChassis::Result r)
     case R::Busy:return 4;case R::OutsideLimits:return 6;case R::Fault:return 8;
     case R::LinkFault:return code(WireResult::LinkFault);case R::TransmitFailed:return 11;}return 10;
 }
-std::uint8_t kind(unsigned i){return i==8?4:(i>=6?3:((i==0||i==1||i==2||i==4)?1:2));}
+std::uint8_t kind(unsigned i){return i==8?4:(i>=6?5:((i==0||i==1||i==2||i==4)?1:2));}
 constexpr float Missing=std::numeric_limits<float>::quiet_NaN();
 }
 int Control::index(std::uint8_t id)
@@ -62,10 +62,10 @@ std::uint16_t Control::validate(const Frame& r) const
         if(i<0)return code(WireResult::UnknownMotor);
         break;
     case Opcode::SetZero:
-        if(i<0||i==8)return code(WireResult::UnknownMotor);
+        if(i<0||i>=6)return code(WireResult::UnknownMotor);
         break;
     case Opcode::Move:
-        if(i<0||i==8)return code(WireResult::UnknownMotor);
+        if(i<0||i>=6)return code(WireResult::UnknownMotor);
         expected=4;
         break;
     case Opcode::SetLimits:
@@ -75,6 +75,10 @@ std::uint16_t Control::validate(const Frame& r) const
     case Opcode::BodyVelocity:
         if(i!=8)return code(WireResult::UnknownMotor);
         expected=12;
+        break;
+    case Opcode::MotorVelocity:
+        if(i!=6&&i!=7)return code(WireResult::UnknownMotor);
+        expected=4;
         break;
     case Opcode::Wheels:
         if(i!=8)return code(WireResult::UnknownMotor);
@@ -97,7 +101,7 @@ void Control::linkTick(std::uint32_t now)
 Frame Control::state(const Frame& r,unsigned i)
 {
     Frame f=response(r,DeviceIds[i],0);auto*p=f.data()+12;
-    p[4]=kind(i);p[5]=i==8?3:(i<6&&linear(i)?2:1);p[6]=i<6?1:(i==8?2:3);
+    p[4]=kind(i);p[5]=i==8?3:(i>=6?4:(linear(i)?2:1));p[6]=i<6?1:(i==8?2:3);
     if(i<6)
     {
         ISRGuard guard;auto&m=*dm_[i];
@@ -114,10 +118,9 @@ Frame Control::state(const Frame& r,unsigned i)
     else if(i<8)
     {
         const auto s=dji_[i-6]->feedback();
-        put16(p+2,(s.connected?1:0)|(s.zeroed?2:0)|8U*(s.enabled?1:0)|
-            (s.busy?32:0)|(s.motion_complete?64:0)|(s.fault?128:0)|(timedOut()?256:0));
+        put16(p+2,(s.connected?1:0)|(s.enabled?8:0)|(s.fault?128:0)|(timedOut()?256:0));
         put16(p+8,code(s.result));put16(p+10,0xffff);put32(p+12,s.feedback_count);
-        putFloat(p+16,s.position_deg);putFloat(p+20,s.velocity_rpm*6);putFloat(p+24,s.target_deg);
+        putFloat(p+16,s.position_deg);putFloat(p+20,s.velocity_rpm);putFloat(p+24,s.target_rpm);
         putFloat(p+28,s.velocity_reference_rpm);finish(f,32);return f;
     }
     else
@@ -153,10 +156,9 @@ Frame Control::parameters(const Frame&r,unsigned i)
     {
         const auto c=dji_[i-6]->controlParameters();
         const float values[]{c.velocity_pid.Kp,c.velocity_pid.Ki,c.velocity_pid.Kd,c.velocity_pid.abs_output_max,
-            c.position_pd.Kp,c.position_pd.Kd,c.position_pd.abs_output_max,
-            c.profile.max_spd,c.profile.max_acc,c.profile.max_jerk,c.finish_deg,c.stationary_rpm};
-        for(unsigned n=0;n<12;++n)putFloat(p+2+4*n,values[n]);
-        finish(f,50);
+            c.max_rpm,c.stationary_rpm};
+        for(unsigned n=0;n<6;++n)putFloat(p+2+4*n,values[n]);
+        finish(f,26);
     }
     else
     {
@@ -185,7 +187,7 @@ Frame Control::dispatch(const Frame&r,unsigned i)
     const auto op=static_cast<Opcode>(r[6]);
     if(op==Opcode::State)return state(r,i);
     if(op==Opcode::Parameters)return parameters(r,i);
-    if(timedOut()&&(op==Opcode::Enable||op==Opcode::Move||op==Opcode::BodyVelocity))
+    if(timedOut()&&(op==Opcode::Enable||op==Opcode::Move||op==Opcode::BodyVelocity||op==Opcode::MotorVelocity))
         return response(r,DeviceIds[i],code(WireResult::LinkFault));
     std::uint16_t result=10;
     if(i<6)
@@ -212,8 +214,8 @@ Frame Control::dispatch(const Frame&r,unsigned i)
     {
         auto& m=*dji_[i-6];
         switch(op){case Opcode::Enable:result=code(m.enable());break;case Opcode::Disable:result=code(m.disable());break;
-        case Opcode::Stop:result=code(m.stop());break;case Opcode::SetZero:result=code(m.setSoftwareZero());break;
-        case Opcode::Move:result=code(m.moveToDegrees(getFloat(r.data()+12)));break;default:break;}
+        case Opcode::Stop:result=code(m.stop());break;
+        case Opcode::MotorVelocity:result=code(m.setVelocityRpm(getFloat(r.data()+12)));break;default:break;}
     }
     else
     {
